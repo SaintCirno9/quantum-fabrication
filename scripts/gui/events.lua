@@ -87,6 +87,13 @@ function on_gui_click(event)
         table.sort(storage.product_craft_data[element_tags.item_name], function(a, b) return a.suitability > b.suitability end)
         update_duplicate_handling_buttons(element.parent, element_tags.item_name)
     elseif element_tags.button_type == "take_out_item" then
+        local requested_stacks = 1
+        local take_all = false
+        if event.control then
+            take_all = true
+        elseif event.shift then
+            requested_stacks = 10
+        end
         local qs_item = {
             name = element_tags.item_name,
             count = 1,
@@ -94,7 +101,7 @@ function on_gui_click(event)
             quality = storage.player_gui[event.player_index].quality.name,
             surface_index = player.physical_surface_index
         }
-        qs_utils.take_from_storage(qs_item, player)
+        qs_utils.take_from_storage(qs_item, player, requested_stacks, take_all)
     elseif element_tags.button_type == "take_out_ghost" then
         player.clear_cursor()
         player.cursor_ghost = {name = element_tags.item_name, quality = storage.player_gui[event.player_index].quality.name}

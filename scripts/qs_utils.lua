@@ -207,7 +207,9 @@ end
 ---Takes a stack of items from storage to the player's inventory. Only if the player is physically present on the same surface (to prevent some cheesing)
 ---@param qs_item QSItem
 ---@param player LuaPlayer
-function qs_utils.take_from_storage(qs_item, player)
+---@param requested_stacks? uint
+---@param take_all? boolean
+function qs_utils.take_from_storage(qs_item, player, requested_stacks, take_all)
     local item_name = qs_item.name
     local prototype = prototypes.item[item_name]
     if not prototype then return end
@@ -216,11 +218,14 @@ function qs_utils.take_from_storage(qs_item, player)
     local quality_name = qs_item.quality
     local player_inventory = utils.get_player_inventory(player)
     if not player_inventory then return end
-    local stack_size = prototype.stack_size
-    if in_storage < stack_size then
-        stack_size = in_storage
+    local amount_to_take = in_storage
+    if not take_all then
+        amount_to_take = prototype.stack_size * (requested_stacks or 1)
     end
-    local inserted = player_inventory.insert({name = item_name, count = stack_size, quality = quality_name})
+    if in_storage < amount_to_take then
+        amount_to_take = in_storage
+    end
+    local inserted = player_inventory.insert({name = item_name, count = amount_to_take, quality = quality_name})
     qs_utils.remove_from_storage(qs_item, inserted)
     update_removal_tab_label(player, item_name, quality_name)
 end
