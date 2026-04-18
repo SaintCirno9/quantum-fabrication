@@ -128,6 +128,9 @@ function on_gui_click(event)
     elseif element.name == "qf_intake_limit_button" then
         storage.options.default_intake_limit = storage.tracked_entities["digitizer-chest"][element_tags.unit_number].settings.intake_limit
         storage.options.default_decraft = storage.tracked_entities["digitizer-chest"][element_tags.unit_number].settings.decraft
+        if storage.tracked_entities["digitizer-chest"][element_tags.unit_number].entity.name == "digitizer-chest" then
+            storage.options.default_digitizer_chest_fluid_enabled = storage.tracked_entities["digitizer-chest"][element_tags.unit_number].settings.fluid_enabled == true
+        end
     elseif element.name == "qf_decraft_button" then
         storage.tracked_entities["digitizer-chest"][element_tags.unit_number].settings.decraft = not storage.tracked_entities["digitizer-chest"][element_tags.unit_number].settings.decraft
     end
@@ -276,6 +279,8 @@ function on_gui_checked_state_changed(event)
         storage.player_gui[event.player_index].options.mark_red = element.state
     elseif element.name == "qf_auto_recheck_item_request_proxies" then
         storage.options.auto_recheck_item_request_proxies = element.state
+    elseif element.name == "qf_enable_fluid_checkbox" then
+        tracking.set_digitizer_chest_fluid_enabled(storage.tracked_entities["digitizer-chest"][element.tags.unit_number], element.state)
     end
 end
 

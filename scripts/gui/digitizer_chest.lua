@@ -55,6 +55,17 @@ function create_digitizer_chest_gui(player, entity)
     decraft_button.tags = {unit_number = entity.unit_number}
     decraft_button.style.width = 150
 
+    if entity.name == "digitizer-chest" then
+        local fluid_checkbox = main_content_frame.add{
+            type = "checkbox",
+            name = "qf_enable_fluid_checkbox",
+            state = entity_settings.fluid_enabled == true,
+            caption = {"qf-entity.digitizer-chest-enable-fluid"},
+            tooltip = {"qf-entity.digitizer-chest-enable-fluid-tooltip"},
+        }
+        fluid_checkbox.tags = {unit_number = entity.unit_number}
+    end
+
     local intake_limit_button = main_content_frame.add{
         type = "button",
         name = "qf_intake_limit_button",

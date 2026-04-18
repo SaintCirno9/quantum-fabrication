@@ -69,6 +69,72 @@ end
 ---@field fluid_filter? string
 ---@field surface_index? uint
 ---@field decraft? boolean
+---@field fluid_enabled? boolean
+
+local function create_digitizer_chest_fluid_container(entity_data)
+    if not entity_data or not entity_data.entity or not entity_data.entity.valid then return end
+    if entity_data.entity.name ~= "digitizer-chest" then return end
+    if entity_data.container_fluid and entity_data.container_fluid.valid then return end
+    local pseudo_fluid_container = entity_data.entity.surface.create_entity{
+        name = "digitizer-chest-fluid",
+        position = entity_data.entity.position,
+        force = entity_data.entity.force
+    }
+    pseudo_fluid_container.destructible = false
+    pseudo_fluid_container.operable = false
+    entity_data.container_fluid = pseudo_fluid_container
+end
+
+local function store_digitizer_chest_fluids(entity_data)
+    local container_fluid = entity_data.container_fluid
+    if not container_fluid or not container_fluid.valid then
+        entity_data.container_fluid = nil
+        return
+    end
+    for name, count in pairs(container_fluid.get_fluid_contents()) do
+        if count > 0 then
+            local removed = container_fluid.remove_fluid{
+                name = name,
+                amount = count,
+            }
+            if removed > 0 then
+                qs_utils.add_to_storage({
+                    surface_index = entity_data.surface_index,
+                    name = name,
+                    count = removed,
+                    type = "fluid",
+                    quality = QS_DEFAULT_QUALITY,
+                })
+            end
+        end
+    end
+end
+
+local function sync_digitizer_chest_fluid_setting(entity_data)
+    if not entity_data or entity_data.name ~= "digitizer-chest" then return end
+    local entity = entity_data.entity
+    if not entity or not entity.valid then return end
+    if entity.name ~= "digitizer-chest" then
+        entity_data.settings.fluid_enabled = false
+        if entity_data.container_fluid and entity_data.container_fluid.valid then
+            entity_data.container_fluid.destroy()
+        end
+        entity_data.container_fluid = nil
+        return
+    end
+    if entity_data.settings.fluid_enabled == nil then
+        entity_data.settings.fluid_enabled = false
+    end
+    if entity_data.settings.fluid_enabled then
+        create_digitizer_chest_fluid_container(entity_data)
+        return
+    end
+    store_digitizer_chest_fluids(entity_data)
+    if entity_data.container_fluid and entity_data.container_fluid.valid then
+        entity_data.container_fluid.destroy()
+    end
+    entity_data.container_fluid = nil
+end
 
 ---Creates a request to be executed later if conditions are met
 ---@param request_data RequestData
@@ -94,6 +160,41 @@ function tracking.recheck_trackable_entities(force_full)
             end
         end
     end
+end
+
+function tracking.sync_digitizer_chest_fluid_settings()
+    local tracked_entities = storage.tracked_entities and storage.tracked_entities["digitizer-chest"]
+    if not tracked_entities then return end
+    for _, entity_data in pairs(tracked_entities) do
+        sync_digitizer_chest_fluid_setting(entity_data)
+    end
+end
+
+function tracking.disable_legacy_digitizer_chest_fluid_interfaces()
+    local tracked_entities = storage.tracked_entities and storage.tracked_entities["digitizer-chest"]
+    if tracked_entities then
+        for _, entity_data in pairs(tracked_entities) do
+            if entity_data.entity and entity_data.entity.valid and entity_data.entity.name == "digitizer-chest" then
+                entity_data.settings.fluid_enabled = false
+                sync_digitizer_chest_fluid_setting(entity_data)
+            end
+        end
+    end
+    for _, surface in pairs(game.surfaces) do
+        for _, entity in pairs(surface.find_entities_filtered{name = "digitizer-chest-fluid"}) do
+            if entity.valid then
+                entity.destroy()
+            end
+        end
+    end
+end
+
+---@param entity_data EntityData?
+---@param enabled boolean
+function tracking.set_digitizer_chest_fluid_enabled(entity_data, enabled)
+    if not entity_data then return end
+    entity_data.settings.fluid_enabled = enabled == true
+    sync_digitizer_chest_fluid_setting(entity_data)
 end
 
 ---@param request_data RequestData
@@ -929,6 +1030,7 @@ function tracking.add_tracked_entity(request_data)
         entity_data.inventory = entity.get_inventory(defines.inventory.chest)
         entity_data.settings.intake_limit = storage.options.default_intake_limit
         entity_data.settings.decraft = storage.options.default_decraft
+        entity_data.settings.fluid_enabled = entity.name == "digitizer-chest" and storage.options.default_digitizer_chest_fluid_enabled == true
         entity_data.signal_active = true
         entity_data.next_signal_check_tick = 0
         entity_data.signal_check_interval_ticks = digitizer_chest_signal_recheck_ticks
@@ -941,16 +1043,7 @@ function tracking.add_tracked_entity(request_data)
             },
             preprocessed_items = {},
         }
-        if entity.name == "digitizer-chest" then
-            local pseudo_fluid_container = surface.create_entity{
-                name = "digitizer-chest-fluid",
-                position = position,
-                force = force
-            }
-            pseudo_fluid_container.destructible = false
-            pseudo_fluid_container.operable = false
-            entity_data.container_fluid = pseudo_fluid_container
-        end
+        sync_digitizer_chest_fluid_setting(entity_data)
     elseif entity.name == "dedigitizer-reactor" then
         local pseudo_container = surface.create_entity{
             name = "dedigitizer-reactor-container",
@@ -1034,7 +1127,11 @@ end
 function tracking.get_entity_data(entity)
     local tracked_entity_name = get_tracking_entity_name(entity.name)
     if not storage.tracked_entities[tracked_entity_name] or not storage.tracked_entities[tracked_entity_name][entity.unit_number] then return end
-    return storage.tracked_entities[tracked_entity_name][entity.unit_number]
+    local entity_data = storage.tracked_entities[tracked_entity_name][entity.unit_number]
+    if tracked_entity_name == "digitizer-chest" then
+        sync_digitizer_chest_fluid_setting(entity_data)
+    end
+    return entity_data
 end
 
 ---@param source LuaEntity
@@ -1061,6 +1158,14 @@ function tracking.update_entity(entity_data)
     local surface_index = entity_data.surface_index
 
     if entity_data.name == "digitizer-chest" then
+        if entity.name == "digitizer-chest"
+            and (
+                entity_data.settings.fluid_enabled == nil
+                or (entity_data.settings.fluid_enabled and not (entity_data.container_fluid and entity_data.container_fluid.valid))
+                or (not entity_data.settings.fluid_enabled and entity_data.container_fluid ~= nil)
+            ) then
+            sync_digitizer_chest_fluid_setting(entity_data)
+        end
         local inventory = entity_data.inventory
         local fetchable = settings.global["qf-super-digitizing-chests"].value
         local limit_value = entity_data.settings.intake_limit

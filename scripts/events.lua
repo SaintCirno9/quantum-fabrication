@@ -67,6 +67,7 @@ function on_init()
         auto_recheck_item_request_proxies = true,
         default_intake_limit = 0,
         default_decraft = true,
+        default_digitizer_chest_fluid_enabled = false,
     }
     storage.sorted_lists = {}
     ---@type table <string, table<uint, RequestData>>
@@ -177,6 +178,11 @@ function on_player_created(event)
 end
 
 function on_config_changed()
+    local disable_legacy_digitizer_chest_fluid_interfaces = storage.options == nil or storage.options.default_digitizer_chest_fluid_enabled == nil
+    storage.options = storage.options or {}
+    if storage.options.default_digitizer_chest_fluid_enabled == nil then
+        storage.options.default_digitizer_chest_fluid_enabled = false
+    end
     if storage.qf_enabled == nil then
         storage.qf_enabled = true
     end
@@ -191,6 +197,11 @@ function on_config_changed()
     process_data()
     process_sorted_lists()
     tracking.recheck_trackable_entities()
+    if disable_legacy_digitizer_chest_fluid_interfaces then
+        tracking.disable_legacy_digitizer_chest_fluid_interfaces()
+    else
+        tracking.sync_digitizer_chest_fluid_settings()
+    end
     tracking.rebuild_digitizer_chest_queues()
 end
 
@@ -529,6 +540,7 @@ end)
 function repair_tracking()
     utils.validate_surfaces()
     tracking.recheck_trackable_entities(true)
+    tracking.sync_digitizer_chest_fluid_settings()
     tracking.rebuild_digitizer_chest_queues()
     tracking.recheck_all_item_request_proxies()
     register_request_table("revivals")
