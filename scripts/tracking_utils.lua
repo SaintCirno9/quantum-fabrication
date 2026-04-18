@@ -301,19 +301,6 @@ local function signals_equal_ordered(signals_a, signals_b)
     return true
 end
 
-local function begin_digitizer_phase_sample(entity_data, phase_name)
-    if not qf_instrument_begin_sample then
-        return nil, nil
-    end
-    return qf_instrument_begin_sample(), "tracking.update_entity.digitizer-chest." .. (entity_data.queue_name or "unknown") .. "." .. phase_name
-end
-
-local function end_digitizer_phase_sample(profiler, stat_name)
-    if profiler and stat_name then
-        qf_instrument_end_sample(stat_name, profiler)
-    end
-end
-
 local function get_digitizer_inventory_processing(entity_data)
     local inventory_processing = entity_data.inventory_processing
     if inventory_processing then
@@ -1094,7 +1081,6 @@ function tracking.update_entity(entity_data)
             entity_data.signal_check_interval_ticks = digitizer_chest_signal_recheck_ticks
         end
         local signals
-        local signal_check_profiler, signal_check_stat_name = begin_digitizer_phase_sample(entity_data, "signal_check")
         if game.tick >= entity_data.next_signal_check_tick then
             local new_signals = entity_data.entity.get_signals(defines.wire_connector_id.circuit_red, defines.wire_connector_id.circuit_green)
             entity_data.signal_active = new_signals ~= nil and next(new_signals) ~= nil
@@ -1109,27 +1095,18 @@ function tracking.update_entity(entity_data)
         else
             signals = entity_data.cached_signals
         end
-        end_digitizer_phase_sample(signal_check_profiler, signal_check_stat_name)
         if not entity_data.signal_active then
             local storage_surface = storage.fabricator_inventory[storage_index]
             local storage_items = storage_surface.item
             local storage_fluids = storage_surface.fluid
             local has_remaining_contents = false
             if inventory and not inventory.is_empty() then
-                local no_signal_inventory_profiler, no_signal_inventory_stat_name = begin_digitizer_phase_sample(entity_data, "no_signal.inventory")
-                local no_signal_inventory_get_contents_profiler, no_signal_inventory_get_contents_stat_name = begin_digitizer_phase_sample(entity_data, "no_signal.inventory.get_contents")
                 local inventory_contents = inventory.get_contents()
-                end_digitizer_phase_sample(no_signal_inventory_get_contents_profiler, no_signal_inventory_get_contents_stat_name)
                 item_qs_item.surface_index = storage_index
                 if limit_value == 0 then
-                    local no_signal_inventory_bulk_store_profiler, no_signal_inventory_bulk_store_stat_name = begin_digitizer_phase_sample(entity_data, "no_signal.inventory.bulk_store")
                     qs_utils.add_item_contents_to_storage(storage_index, inventory_contents, decraft)
-                    end_digitizer_phase_sample(no_signal_inventory_bulk_store_profiler, no_signal_inventory_bulk_store_stat_name)
-                    local no_signal_inventory_clear_profiler, no_signal_inventory_clear_stat_name = begin_digitizer_phase_sample(entity_data, "no_signal.inventory.clear")
                     inventory.clear()
-                    end_digitizer_phase_sample(no_signal_inventory_clear_profiler, no_signal_inventory_clear_stat_name)
                 else
-                    local no_signal_inventory_limited_loop_profiler, no_signal_inventory_limited_loop_stat_name = begin_digitizer_phase_sample(entity_data, "no_signal.inventory.limited_loop")
                     for index = 1, #inventory_contents do
                         local item = inventory_contents[index]
                         if storage_items[item.name][item.quality] < limit_value then
@@ -1145,13 +1122,10 @@ function tracking.update_entity(entity_data)
                             has_remaining_contents = true
                         end
                     end
-                    end_digitizer_phase_sample(no_signal_inventory_limited_loop_profiler, no_signal_inventory_limited_loop_stat_name)
                 end
-                end_digitizer_phase_sample(no_signal_inventory_profiler, no_signal_inventory_stat_name)
             end
             local fluid_contents = entity_data.container_fluid and entity_data.container_fluid.get_fluid_contents()
             if fluid_contents then
-                local no_signal_fluid_profiler, no_signal_fluid_stat_name = begin_digitizer_phase_sample(entity_data, "no_signal.fluid")
                 item_qs_fluid.surface_index = storage_index
                 if limit_value == 0 then
                     for name, count in pairs(fluid_contents) do
@@ -1176,9 +1150,7 @@ function tracking.update_entity(entity_data)
                         end
                     end
                 end
-                end_digitizer_phase_sample(no_signal_fluid_profiler, no_signal_fluid_stat_name)
             end
-            local no_signal_queue_profiler, no_signal_queue_stat_name = begin_digitizer_phase_sample(entity_data, "no_signal.queue")
             if has_remaining_contents then
                 entity_data.idle_empty_checks = 0
                 set_digitizer_chest_queue(entity_data, "active")
@@ -1190,14 +1162,12 @@ function tracking.update_entity(entity_data)
                     set_digitizer_chest_queue(entity_data, "idle")
                 end
             end
-            end_digitizer_phase_sample(no_signal_queue_profiler, no_signal_queue_stat_name)
             return
         end
         entity_data.idle_empty_checks = 0
 
         local fixed_quantity = 0
         local quality = "normal"
-        local signal_prepare_profiler, signal_prepare_stat_name = begin_digitizer_phase_sample(entity_data, "signal.prepare")
         local inventory_processing = get_digitizer_inventory_processing(entity_data)
         reset_digitizer_inventory_processing(inventory_processing)
         local processing_items = inventory_processing.items
@@ -1250,7 +1220,6 @@ function tracking.update_entity(entity_data)
                 processing_fluids.count = fixed_quantity
             end
         end
-        end_digitizer_phase_sample(signal_prepare_profiler, signal_prepare_stat_name)
 
         -- We are only allower to select storage_index if the map setting is enabled
         if not storage.fabricator_inventory[storage_index] or not fetchable then
@@ -1262,7 +1231,6 @@ function tracking.update_entity(entity_data)
 
         if inventory then
             if not inventory.is_empty() then
-                local signal_inventory_balance_profiler, signal_inventory_balance_stat_name = begin_digitizer_phase_sample(entity_data, "signal.inventory_balance")
                 local inventory_contents = inventory.get_contents()
                 -- If the container has "Read contents" checked, then we'll need to substract stored items from a signal value later
                 local read_contents = true
@@ -1310,9 +1278,7 @@ function tracking.update_entity(entity_data)
                         end
                     end
                 end
-                end_digitizer_phase_sample(signal_inventory_balance_profiler, signal_inventory_balance_stat_name)
             end
-            local signal_inventory_pull_profiler, signal_inventory_pull_stat_name = begin_digitizer_phase_sample(entity_data, "signal.inventory_pull")
             for item_name, item_by_quality in pairs(processing_items) do
                 for item_quality, item_count in pairs(item_by_quality) do
                     if item_count > 0 then
@@ -1324,11 +1290,9 @@ function tracking.update_entity(entity_data)
                     end
                 end
             end
-            end_digitizer_phase_sample(signal_inventory_pull_profiler, signal_inventory_pull_stat_name)
         end
         local fluid_contents = entity_data.container_fluid and entity_data.container_fluid.get_fluid_contents()
         if fluid_contents then
-            local signal_fluid_profiler, signal_fluid_stat_name = begin_digitizer_phase_sample(entity_data, "signal.fluid")
             item_qs_fluid.surface_index = storage_index
             for name, count in pairs(fluid_contents) do
                 item_qs_fluid.name = name
@@ -1361,11 +1325,8 @@ function tracking.update_entity(entity_data)
                 item_qs_fluid.surface_index = storage_index
                 qs_utils.pull_from_storage(item_qs_fluid, entity_data.container_fluid)
             end
-            end_digitizer_phase_sample(signal_fluid_profiler, signal_fluid_stat_name)
         end
-        local signal_queue_profiler, signal_queue_stat_name = begin_digitizer_phase_sample(entity_data, "signal.queue")
         set_digitizer_chest_queue(entity_data, "signal")
-        end_digitizer_phase_sample(signal_queue_profiler, signal_queue_stat_name)
         return
     end
 
@@ -1488,7 +1449,6 @@ function tracking.update_entity(entity_data)
         ---@diagnostic disable-next-line: assign-type-mismatch
         local control_behavior = entity.get_control_behavior()
         if not control_behavior then return end
-        local config_profiler = qf_instrument_begin_sample and qf_instrument_begin_sample()
         while control_behavior.sections_count < 2 do
             control_behavior.add_section()
         end
@@ -1499,15 +1459,8 @@ function tracking.update_entity(entity_data)
             end
         end
         if not storage_index or not storage.fabricator_inventory[storage_index] then storage_index = entity_data.surface_index end
-        if config_profiler then
-            qf_instrument_end_sample("tracking.update_entity.qf-storage-reader.read_config", config_profiler)
-        end
         local signals = qs_utils.get_storage_signals(storage_index)
-        local write_profiler = qf_instrument_begin_sample and qf_instrument_begin_sample()
         control_behavior.get_section(2).filters = signals
-        if write_profiler then
-            qf_instrument_end_sample("tracking.update_entity.qf-storage-reader.write_filters", write_profiler)
-        end
         return
     end
 end

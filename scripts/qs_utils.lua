@@ -131,10 +131,6 @@ function qs_utils.add_item_contents_to_storage(surface_index, item_contents, try
     local filters, indices = ensure_storage_signal_cache(inventory)
     local stored_items = inventory.item
     local do_decraft = try_defabricate and settings.global["qf-allow-decrafting"].value
-    local storage_profiler = qf_instrument_begin_sample and qf_instrument_begin_sample()
-    local storage_count_write_profiler = nil
-    local storage_signal_cache_profiler = nil
-    local decraft_profiler = nil
     local decraft_item = nil
     if do_decraft then
         decraft_item = {
@@ -149,57 +145,15 @@ function qs_utils.add_item_contents_to_storage(surface_index, item_contents, try
         local item = item_contents[index]
         local item_name = item.name
         local quality_name = item.quality
-        if storage_count_write_profiler then
-            storage_count_write_profiler.restart()
-        elseif qf_instrument_begin_sample then
-            storage_count_write_profiler = qf_instrument_begin_sample()
-        end
         local new_count = stored_items[item_name][quality_name] + item.count
         stored_items[item_name][quality_name] = new_count
-        if storage_count_write_profiler then
-            storage_count_write_profiler.stop()
-        end
-        if storage_signal_cache_profiler then
-            storage_signal_cache_profiler.restart()
-        elseif qf_instrument_begin_sample then
-            storage_signal_cache_profiler = qf_instrument_begin_sample()
-        end
         set_storage_signal_cache_count(filters, indices, "item", item_name, quality_name, new_count)
-        if storage_signal_cache_profiler then
-            storage_signal_cache_profiler.stop()
-        end
         if do_decraft and not storage.tiles[item_name] then
-            if storage_profiler then
-                storage_profiler.stop()
-            end
-            if decraft_profiler then
-                decraft_profiler.restart()
-            elseif qf_instrument_begin_sample then
-                decraft_profiler = qf_instrument_begin_sample()
-            end
             decraft_item.name = item_name
             decraft_item.count = item.count
             decraft_item.quality = quality_name
             decraft(decraft_item)
-            if decraft_profiler then
-                decraft_profiler.stop()
-            end
-            if storage_profiler then
-                storage_profiler.restart()
-            end
         end
-    end
-    if storage_profiler then
-        qf_instrument_end_sample("qs_utils.add_item_contents_to_storage.storage", storage_profiler)
-    end
-    if storage_count_write_profiler then
-        qf_instrument_end_sample("qs_utils.add_item_contents_to_storage.storage.count_write", storage_count_write_profiler)
-    end
-    if storage_signal_cache_profiler then
-        qf_instrument_end_sample("qs_utils.add_item_contents_to_storage.storage.signal_cache", storage_signal_cache_profiler)
-    end
-    if decraft_profiler then
-        qf_instrument_end_sample("qs_utils.add_item_contents_to_storage.decraft", decraft_profiler)
     end
 end
 
@@ -208,22 +162,8 @@ end
 ---@param quality_name string
 ---@param count uint
 function qs_utils.queue_decraft(surface_index, item_name, quality_name, count)
-    local call_profiler = nil
-    if qf_begin_decraft_profiler_sample then
-        call_profiler = qf_begin_decraft_profiler_sample()
-    end
-
-    local allowed = true
-    if count <= 0 or not settings.global["qf-allow-decrafting"].value then
-        allowed = false
-    elseif not utils.is_placeable(item_name) or storage.tiles[item_name] then
-        allowed = false
-    end
-
-    if qf_end_decraft_profiler_sample then
-        qf_end_decraft_profiler_sample(call_profiler, false)
-    end
-    if not allowed then return end
+    if count <= 0 or not settings.global["qf-allow-decrafting"].value then return end
+    if not utils.is_placeable(item_name) or storage.tiles[item_name] then return end
 
     local queue = ensure_decraft_queue_storage()
     local queue_key = get_decraft_queue_key(surface_index, item_name, quality_name)
@@ -534,14 +474,8 @@ end
 ---@param storage_index uint
 ---@return LogisticFilter[]
 function qs_utils.get_storage_signals(storage_index)
-    local build_profiler = qf_instrument_begin_sample and qf_instrument_begin_sample()
     local inventory = storage.fabricator_inventory[storage_index]
-    local signals, _, did_build = ensure_storage_signal_cache(inventory)
-    if build_profiler and did_build then
-        qf_instrument_end_sample("qs_utils.get_storage_signals.build", build_profiler)
-    elseif build_profiler then
-        build_profiler.stop()
-    end
+    local signals = ensure_storage_signal_cache(inventory)
     return signals
 end
 
