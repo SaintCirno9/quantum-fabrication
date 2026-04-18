@@ -484,7 +484,6 @@ end
 
 function on_tick(event)
     flib_dictionary.on_tick(event)
-    qs_utils.process_decraft_queue(1)
     if storage.qf_enabled == false then return end
     tracking.on_tick_update_requests()
     tracking.update_lost_module_requests_neo()

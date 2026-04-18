@@ -16,6 +16,85 @@ local utils = require("scripts/utils")
 local qs_utils = {}
 local decraft_queue_batch_size = 2
 local decraft_queue_item_max_count = 64
+local storage_signal_types = {"item", "fluid"}
+
+local function get_storage_signal_key(item_type, item_name, quality_name)
+    return item_type .. "|" .. item_name .. "|" .. quality_name
+end
+
+local function get_storage_signal_count(count)
+    local signal_count = count
+    if signal_count > 2147483647 then signal_count = 2147483647 end
+    return signal_count
+end
+
+local function ensure_storage_signal_cache(inventory)
+    local filters = inventory.qf_storage_reader_filters
+    local indices = inventory.qf_storage_reader_filter_indices
+    if filters and indices then
+        return filters, indices, false
+    end
+
+    filters = {}
+    indices = {}
+    for _, item_type in pairs(storage_signal_types) do
+        local stored_items = inventory[item_type]
+        if stored_items then
+            for item_name, item_by_quality in pairs(stored_items) do
+                for quality_name, count in pairs(item_by_quality) do
+                    if count > 0 then
+                        local key = get_storage_signal_key(item_type, item_name, quality_name)
+                        indices[key] = #filters + 1
+                        filters[#filters + 1] = {
+                            value = {type = item_type, quality = quality_name, name = item_name},
+                            min = get_storage_signal_count(count),
+                        }
+                    end
+                end
+            end
+        end
+    end
+    inventory.qf_storage_reader_filters = filters
+    inventory.qf_storage_reader_filter_indices = indices
+    return filters, indices, true
+end
+
+local function set_storage_signal_cache_count(filters, indices, item_type, item_name, quality_name, count)
+    local key = get_storage_signal_key(item_type, item_name, quality_name)
+    local index = indices[key]
+    if count > 0 then
+        local signal_count = get_storage_signal_count(count)
+        if index then
+            filters[index].min = signal_count
+            return
+        end
+        index = #filters + 1
+        indices[key] = index
+        filters[index] = {
+            value = {type = item_type, quality = quality_name, name = item_name},
+            min = signal_count,
+        }
+        return
+    end
+
+    if not index then
+        return
+    end
+
+    local last_index = #filters
+    local last_filter = filters[last_index]
+    filters[last_index] = nil
+    indices[key] = nil
+    if index ~= last_index then
+        filters[index] = last_filter
+        indices[get_storage_signal_key(last_filter.value.type, last_filter.value.name, last_filter.value.quality)] = index
+    end
+end
+
+local function update_storage_signal_cache(inventory, item_type, item_name, quality_name, count)
+    local filters, indices = ensure_storage_signal_cache(inventory)
+    set_storage_signal_cache_count(filters, indices, item_type, item_name, quality_name, count)
+end
 
 local function ensure_decraft_queue_storage()
     if not storage.decraft_queue then
@@ -37,8 +116,91 @@ end
 ---@param count_override? int
 function qs_utils.add_to_storage(qs_item, try_defabricate, count_override)
     if not qs_item then return end
-    storage.fabricator_inventory[qs_item.surface_index][qs_item.type][qs_item.name][qs_item.quality] = storage.fabricator_inventory[qs_item.surface_index][qs_item.type][qs_item.name][qs_item.quality] + (count_override or qs_item.count)
+    local inventory = storage.fabricator_inventory[qs_item.surface_index]
+    local new_count = inventory[qs_item.type][qs_item.name][qs_item.quality] + (count_override or qs_item.count)
+    inventory[qs_item.type][qs_item.name][qs_item.quality] = new_count
+    update_storage_signal_cache(inventory, qs_item.type, qs_item.name, qs_item.quality, new_count)
     if try_defabricate and settings.global["qf-allow-decrafting"].value and not storage.tiles[qs_item.name] then decraft(qs_item) end
+end
+
+---@param surface_index uint
+---@param item_contents ItemWithQualityCounts
+---@param try_defabricate? boolean
+function qs_utils.add_item_contents_to_storage(surface_index, item_contents, try_defabricate)
+    local inventory = storage.fabricator_inventory[surface_index]
+    local filters, indices = ensure_storage_signal_cache(inventory)
+    local stored_items = inventory.item
+    local do_decraft = try_defabricate and settings.global["qf-allow-decrafting"].value
+    local storage_profiler = qf_instrument_begin_sample and qf_instrument_begin_sample()
+    local storage_count_write_profiler = nil
+    local storage_signal_cache_profiler = nil
+    local decraft_profiler = nil
+    local decraft_item = nil
+    if do_decraft then
+        decraft_item = {
+            surface_index = surface_index,
+            name = "",
+            count = 0,
+            type = "item",
+            quality = QS_DEFAULT_QUALITY,
+        }
+    end
+    for index = 1, #item_contents do
+        local item = item_contents[index]
+        local item_name = item.name
+        local quality_name = item.quality
+        if storage_count_write_profiler then
+            storage_count_write_profiler.restart()
+        elseif qf_instrument_begin_sample then
+            storage_count_write_profiler = qf_instrument_begin_sample()
+        end
+        local new_count = stored_items[item_name][quality_name] + item.count
+        stored_items[item_name][quality_name] = new_count
+        if storage_count_write_profiler then
+            storage_count_write_profiler.stop()
+        end
+        if storage_signal_cache_profiler then
+            storage_signal_cache_profiler.restart()
+        elseif qf_instrument_begin_sample then
+            storage_signal_cache_profiler = qf_instrument_begin_sample()
+        end
+        set_storage_signal_cache_count(filters, indices, "item", item_name, quality_name, new_count)
+        if storage_signal_cache_profiler then
+            storage_signal_cache_profiler.stop()
+        end
+        if do_decraft and not storage.tiles[item_name] then
+            if storage_profiler then
+                storage_profiler.stop()
+            end
+            if decraft_profiler then
+                decraft_profiler.restart()
+            elseif qf_instrument_begin_sample then
+                decraft_profiler = qf_instrument_begin_sample()
+            end
+            decraft_item.name = item_name
+            decraft_item.count = item.count
+            decraft_item.quality = quality_name
+            decraft(decraft_item)
+            if decraft_profiler then
+                decraft_profiler.stop()
+            end
+            if storage_profiler then
+                storage_profiler.restart()
+            end
+        end
+    end
+    if storage_profiler then
+        qf_instrument_end_sample("qs_utils.add_item_contents_to_storage.storage", storage_profiler)
+    end
+    if storage_count_write_profiler then
+        qf_instrument_end_sample("qs_utils.add_item_contents_to_storage.storage.count_write", storage_count_write_profiler)
+    end
+    if storage_signal_cache_profiler then
+        qf_instrument_end_sample("qs_utils.add_item_contents_to_storage.storage.signal_cache", storage_signal_cache_profiler)
+    end
+    if decraft_profiler then
+        qf_instrument_end_sample("qs_utils.add_item_contents_to_storage.decraft", decraft_profiler)
+    end
 end
 
 ---@param surface_index uint
@@ -46,8 +208,23 @@ end
 ---@param quality_name string
 ---@param count uint
 function qs_utils.queue_decraft(surface_index, item_name, quality_name, count)
-    if count <= 0 or not settings.global["qf-allow-decrafting"].value then return end
-    if not utils.is_placeable(item_name) or storage.tiles[item_name] then return end
+    local call_profiler = nil
+    if qf_begin_decraft_profiler_sample then
+        call_profiler = qf_begin_decraft_profiler_sample()
+    end
+
+    local allowed = true
+    if count <= 0 or not settings.global["qf-allow-decrafting"].value then
+        allowed = false
+    elseif not utils.is_placeable(item_name) or storage.tiles[item_name] then
+        allowed = false
+    end
+
+    if qf_end_decraft_profiler_sample then
+        qf_end_decraft_profiler_sample(call_profiler, false)
+    end
+    if not allowed then return end
+
     local queue = ensure_decraft_queue_storage()
     local queue_key = get_decraft_queue_key(surface_index, item_name, quality_name)
     local queued_item = queue[queue_key]
@@ -119,7 +296,10 @@ end
 ---@param count_override? int
 function qs_utils.remove_from_storage(qs_item, count_override)
     if not qs_item then return end
-    storage.fabricator_inventory[qs_item.surface_index][qs_item.type][qs_item.name][qs_item.quality] = storage.fabricator_inventory[qs_item.surface_index][qs_item.type][qs_item.name][qs_item.quality] - (count_override or qs_item.count)
+    local inventory = storage.fabricator_inventory[qs_item.surface_index]
+    local new_count = inventory[qs_item.type][qs_item.name][qs_item.quality] - (count_override or qs_item.count)
+    inventory[qs_item.type][qs_item.name][qs_item.quality] = new_count
+    update_storage_signal_cache(inventory, qs_item.type, qs_item.name, qs_item.quality, new_count)
 end
 
 ---Removes items from both the Storage and the player's inventory
@@ -354,20 +534,13 @@ end
 ---@param storage_index uint
 ---@return LogisticFilter[]
 function qs_utils.get_storage_signals(storage_index)
-    local signals = {}
-    for _, type in pairs({"item", "fluid"}) do
-        for name, item in pairs(storage.fabricator_inventory[storage_index][type]) do
-            for quality, count in pairs(item) do
-                local temp_count = count
-                if temp_count > 2147483647 then temp_count = 2147483647 end
-                if temp_count > 0 then
-                    signals[#signals + 1] = {
-                        value = {type = type, quality = quality, name = name},
-                        min = temp_count,
-                    }
-                end
-            end
-        end
+    local build_profiler = qf_instrument_begin_sample and qf_instrument_begin_sample()
+    local inventory = storage.fabricator_inventory[storage_index]
+    local signals, _, did_build = ensure_storage_signal_cache(inventory)
+    if build_profiler and did_build then
+        qf_instrument_end_sample("qs_utils.get_storage_signals.build", build_profiler)
+    elseif build_profiler then
+        build_profiler.stop()
     end
     return signals
 end
@@ -376,11 +549,11 @@ end
 ---@param source_index uint
 ---@param target_index uint
 function qs_utils.move_all_items(source_index, target_index)
-    for _, type in pairs({"item", "fluid"}) do
+    for _, type in pairs(storage_signal_types) do
         for name, item in pairs(storage.fabricator_inventory[source_index][type]) do
             for quality, count in pairs(item) do
                 qs_utils.add_to_storage({type = type, name = name, count = count, quality = quality, surface_index = target_index})
-                storage.fabricator_inventory[source_index][type][name][quality] = 0
+                qs_utils.remove_from_storage({type = type, name = name, count = count, quality = quality, surface_index = source_index})
             end
         end
     end
