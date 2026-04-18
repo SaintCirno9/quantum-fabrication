@@ -61,6 +61,7 @@ function build_options_gui(player)
 
     general_flow.add{type = "button", name = "process_recipes_button", caption = {"qf-options.debug-reprocess-recipes"}, tooltip = {"qf-options.debug-reprocess-recipes-tooltip"}}
     general_flow.add{type = "button", name = "update_module_requests_button", caption = {"qf-options.debug-update_module_requests"}, tooltip = {"qf-options.debug-update_module_requests-tooltip"}}
+    general_flow.add{type = "button", name = "repair_tracking_button", caption = {"qf-options.debug-repair-tracking"}, tooltip = {"qf-options.debug-repair-tracking-tooltip"}}
 --[[
     -- Auto recheck item request proxies     
     local auto_recheck_item_reques_proxies_flow = general_flow.add{type = "flow", direction = "horizontal"}

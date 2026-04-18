@@ -8,6 +8,8 @@ local chunks_utils = {}
 function chunks_utils.initialize_chunks()
     ---@type table <string, ChunksData>
     storage.chunks = {}
+    ---@type table <string, ChunksData>
+    storage.dirty_chunks = {}
     for _, surface in pairs(game.surfaces) do
         for chunk in surface.get_chunks() do
             local entities = surface.find_entities_filtered{area = chunk.area, force = "player", limit = 1}
@@ -22,12 +24,16 @@ end
 ---@param surface_index uint
 ---@param position MapPosition|BoundingBox
 function chunks_utils.add_chunk(surface_index, position)
+    if not storage.chunks then storage.chunks = {} end
+    if not storage.dirty_chunks then storage.dirty_chunks = {} end
     local area = chunks_utils.to_chunk(position)
     local chunk_name = chunks_utils.get_chunk_name(surface_index, area)
-    storage.chunks[chunk_name] = {
+    local chunk_data = {
         area = area,
         surface_index = surface_index
     }
+    storage.chunks[chunk_name] = chunk_data
+    storage.dirty_chunks[chunk_name] = chunk_data
 end
 
 ---@param surface_index uint

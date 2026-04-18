@@ -30,21 +30,22 @@ function instant_fabrication(entity, player_index)
         end
     end
 
-    -- Check if requested item is available
+    -- 检查现成成品与可制造性
     local in_storage, in_inventory = qs_utils.count_in_storage(qs_item, player_inventory, player_surface_index)
+    local recipe = qf_utils.get_craftable_recipe(qs_item, player_inventory)
 
-    -- If it is, then just use it to instantly revive the entity
+    -- 优先使用仓库中的现成成品
     if in_storage > 0 then
+        return revive_ghost(entity, qs_item)
+    -- 其次优先现场制造，避免优先吃掉玩家背包里的建筑成品
+    elseif recipe then
+        qf_utils.fabricate_recipe(recipe, entity.quality.name, surface_index, player_inventory)
         return revive_ghost(entity, qs_item)
     elseif in_inventory > 0 then
         return revive_ghost(entity, qs_item, player_inventory)
     end
 
-    -- Nothing? Guess we are fabricating
-    local recipe = qf_utils.get_craftable_recipe(qs_item, player_inventory)
-    if not recipe then return false end
-    qf_utils.fabricate_recipe(recipe, entity.quality.name, surface_index, player_inventory)
-    return revive_ghost(entity, qs_item)
+    return false
 end
 
 function instant_tileation()
@@ -78,23 +79,21 @@ function instant_tileation()
     for _, surface_data in pairs(storage.surface_data.planets) do
         local surface = surface_data.surface
         local tiles = surface.find_entities_filtered({name = "tile-ghost"})
-        if tiles then
+        if next(tiles) then
             local tile_availability = qs_utils.get_available_tiles(surface.index, player_inventory, player_surface_index)
             local final_tiles = {}
             local indices = {}
             local overall_index = 1
-            for tile_name, _ in pairs(storage.tiles) do
-                indices[tile_name] = 0
-            end
             for _, tile in pairs(tiles) do
                 local tile_name = storage.tile_link[tile.ghost_name]
-                if tile_availability[tile_name] > indices[tile_name] then
+                local current_count = indices[tile_name] or 0
+                if tile_availability[tile_name] > current_count then
                     final_tiles[overall_index] = {
                         name = tile.ghost_name,
                         position = tile.position
                     }
                     overall_index = overall_index + 1
-                    indices[tile_name] = indices[tile_name] + 1
+                    indices[tile_name] = current_count + 1
                 else
                     schedule_retileation = true
                 end
@@ -193,13 +192,30 @@ end
 
 ---@param request_type "revivals"|"destroys"|"upgrades"
 function register_request_table(request_type)
-    local result = {}
     utils.validate_surfaces()
     for _, surface_data in pairs(storage.surface_data.planets) do
-        local targets = surface_data.surface.find_entities_filtered(Request_table_filter_link[request_type])
-        result = flib_table.array_merge({result, targets})
+        register_request_table_on_surface(request_type, surface_data.surface_index)
     end
-    storage.tracked_requests[request_type] = result
+end
+
+---@param request_type "revivals"|"destroys"|"upgrades"
+---@param surface_index uint
+function register_request_table_on_surface(request_type, surface_index)
+    local surface_data = storage.surface_data.planets[surface_index]
+    if not surface_data or not surface_data.surface or not surface_data.surface.valid then return end
+    local targets = surface_data.surface.find_entities_filtered(Request_table_filter_link[request_type])
+    for _, entity in pairs(targets) do
+        local player_index = storage.request_player_ids[request_type]
+        local existing_request = storage.tracked_requests[request_type][entity.unit_number]
+        if existing_request and existing_request.player_index ~= nil then
+            player_index = existing_request.player_index
+        end
+        tracking.create_tracked_request({
+            request_type = request_type,
+            entity = entity,
+            player_index = player_index
+        })
+    end
 end
 
 ---@param entity LuaEntity

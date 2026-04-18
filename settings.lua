@@ -84,20 +84,41 @@ table.insert(settings,
 })
 table.insert(settings,
     {
+        type = "int-setting",
+        order = "apa",
+        name = "qf-digitizer-signal-nth-tick",
+        setting_type = "startup",
+        default_value = 30,
+        minimum_value = 1,
+        maximum_value = 3600,
+})
+table.insert(settings,
+    {
+        type = "int-setting",
+        order = "apb",
+        name = "qf-digitizer-active-nth-tick",
+        setting_type = "startup",
+        default_value = 15,
+        minimum_value = 1,
+        maximum_value = 3600,
+})
+table.insert(settings,
+    {
+        type = "int-setting",
+        order = "apc",
+        name = "qf-digitizer-idle-nth-tick",
+        setting_type = "startup",
+        default_value = 120,
+        minimum_value = 1,
+        maximum_value = 3600,
+})
+table.insert(settings,
+    {
         type = "bool-setting",
         order = "cf",
         name = "qf-enable-auto-repair",
         setting_type = "startup",
         default_value = true
-})
-table.insert(settings,
-    {
-        type = "int-setting",
-        order = "ee",
-        name = "qf-chests-processed-per-second",
-        setting_type = "startup",
-        default_value = 6,
-        allowed_values = {1,2,3,4,5,6,10,12,15,20,30,60,120,180,240,300,360,600,1200,1800,2400},
 })
 
 data:extend(settings)

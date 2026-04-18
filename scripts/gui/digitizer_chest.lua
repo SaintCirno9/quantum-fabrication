@@ -1,3 +1,5 @@
+local tracking = require("scripts/tracking_utils")
+
 ---@param player LuaPlayer
 ---@param entity LuaEntity
 function create_digitizer_chest_gui(player, entity)
@@ -9,11 +11,13 @@ function create_digitizer_chest_gui(player, entity)
         anchor = {
             gui = defines.relative_gui_type.container_gui,
             position = defines.relative_gui_position.right,
-            name = "digitizer-chest",
+            name = entity.name,
         },
         direction = "vertical"}
 
-    local entity_settings = storage.tracked_entities[entity.name][entity.unit_number].settings
+    local entity_data = tracking.get_entity_data(entity)
+    if not entity_data then return end
+    local entity_settings = entity_data.settings
     local text = tostring(entity_settings.intake_limit)
     if text == "0" then text = "" end
 

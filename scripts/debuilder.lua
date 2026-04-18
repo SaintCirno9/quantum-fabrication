@@ -2,6 +2,166 @@ local qs_utils = require("scripts/qs_utils")
 local qf_utils = require("scripts/qf_utils")
 local utils = require("scripts/utils")
 
+local AMMO_LOADER_RETURN_SETTING = "ammo_loader_return_items"
+local AMMO_LOADER_ENABLED_SETTING = "ammo_loader_enabled"
+local AMMO_LOADER_BYPASS_RESEARCH_SETTING = "ammo_loader_bypass_research"
+local AMMO_LOADER_RETURN_TECH = "ammo-loader-tech-return-items"
+local AMMO_LOADER_BURNERS_TECH = "ammo-loader-tech-burners"
+local AMMO_LOADER_VEHICLES_TECH = "ammo-loader-tech-vehicles"
+local AMMO_LOADER_ARTILLERY_TECH = "ammo-loader-tech-artillery"
+local AMMO_LOADER_BURNER_STRUCTURES_SETTING = "ammo_loader_fill_burner_structures"
+local AMMO_LOADER_TRAINS_SETTING = "ammo_loader_fill_locomotives"
+local AMMO_LOADER_ARTILLERY_SETTING = "ammo_loader_fill_artillery"
+local AMMO_LOADER_CHEST_RADIUS_SETTING = "ammo_loader_chest_radius"
+local AMMO_LOADER_STORAGE_CHEST = "ammo-loader-chest-storage"
+
+local AMMO_LOADER_PROVIDER_CHESTS = {
+    "ammo-loader-chest",
+    "ammo-loader-chest-requester",
+    "ammo-loader-chest-passive-provider"
+}
+
+local AMMO_LOADER_TRACKED_INVENTORIES = {
+    [defines.inventory.turret_ammo] = true,
+    [defines.inventory.car_ammo] = true,
+    [defines.inventory.character_ammo] = true,
+    [defines.inventory.artillery_turret_ammo] = true,
+    [defines.inventory.artillery_wagon_ammo] = true,
+    [defines.inventory.fuel] = true,
+    [defines.inventory.roboport_material] = true
+}
+
+local AMMO_LOADER_MOVING_ENTITY_TYPES = {
+    ["character"] = true,
+    ["car"] = true,
+    ["artillery-wagon"] = true,
+    ["locomotive"] = true,
+    ["spider-vehicle"] = true
+}
+
+local is_ammo_loader_tracked_inventory
+
+local function is_ammo_loader_tech_available(force, tech_name)
+    if settings.startup[AMMO_LOADER_BYPASS_RESEARCH_SETTING].value then return true end
+    local technology = force.technologies[tech_name]
+    return technology and technology.researched or false
+end
+
+local function can_ammo_loader_return(entity)
+    if not script.active_mods["ammo-loader"] then return false end
+    if not settings.global[AMMO_LOADER_ENABLED_SETTING].value then return false end
+    if not settings.global[AMMO_LOADER_RETURN_SETTING].value then return false end
+    return is_ammo_loader_tech_available(entity.force, AMMO_LOADER_RETURN_TECH)
+end
+
+local function get_ammo_loader_chest_search(entity)
+    local radius = settings.global[AMMO_LOADER_CHEST_RADIUS_SETTING].value
+    local search = {
+        force = entity.force,
+        name = AMMO_LOADER_PROVIDER_CHESTS
+    }
+    if radius > 0 then
+        local position = entity.position
+        search.area = {
+            {position.x - radius, position.y - radius},
+            {position.x + radius, position.y + radius}
+        }
+    end
+    return search
+end
+
+local function try_insert_into_ammo_loader_chest(entity, stack, chest_names, match_item_only, prefer_storage_filter)
+    local search = get_ammo_loader_chest_search(entity)
+    search.name = chest_names
+    local best_entity
+    local best_has_filter = false
+    local best_distance
+
+    for _, chest in pairs(entity.surface.find_entities_filtered(search)) do
+        local inventory = chest.get_inventory(defines.inventory.chest)
+        if inventory and inventory.can_insert({name = stack.name, count = stack.count, quality = stack.quality}) then
+            if not match_item_only or inventory.get_item_count(stack.name) > 0 then
+                local filter = nil
+                if prefer_storage_filter and chest.name == AMMO_LOADER_STORAGE_CHEST then
+                    filter = chest.storage_filter
+                end
+                local has_filter = prefer_storage_filter and filter and filter.name == stack.name or false
+                local dx = chest.position.x - entity.position.x
+                local dy = chest.position.y - entity.position.y
+                local distance = dx * dx + dy * dy
+                if not best_entity
+                    or (has_filter and not best_has_filter)
+                    or (has_filter == best_has_filter and distance < best_distance) then
+                    best_entity = chest
+                    best_has_filter = has_filter
+                    best_distance = distance
+                end
+            end
+        end
+    end
+
+    if not best_entity then return 0 end
+    return best_entity.get_inventory(defines.inventory.chest).insert({
+        name = stack.name,
+        count = stack.count,
+        quality = stack.quality
+    })
+end
+
+local function add_to_ammo_loader_system(entity, inventory_index, qs_item)
+    if not is_ammo_loader_tracked_inventory(entity, inventory_index) then return 0 end
+    local inserted = try_insert_into_ammo_loader_chest(entity, qs_item, AMMO_LOADER_PROVIDER_CHESTS, true, false)
+    if inserted >= qs_item.count then return inserted end
+
+    local remaining = {
+        name = qs_item.name,
+        count = qs_item.count - inserted,
+        quality = qs_item.quality
+    }
+    return inserted + try_insert_into_ammo_loader_chest(entity, remaining, {AMMO_LOADER_STORAGE_CHEST}, false, true)
+end
+
+is_ammo_loader_tracked_inventory = function(entity, inventory_index)
+    if not AMMO_LOADER_TRACKED_INVENTORIES[inventory_index] then return false end
+    if not can_ammo_loader_return(entity) then return false end
+
+    if inventory_index == defines.inventory.turret_ammo then
+        return entity.type == "ammo-turret"
+    elseif inventory_index == defines.inventory.car_ammo then
+        if entity.type == "spider-vehicle" then
+            return true
+        end
+        return entity.type == "car" and is_ammo_loader_tech_available(entity.force, AMMO_LOADER_VEHICLES_TECH)
+    elseif inventory_index == defines.inventory.character_ammo then
+        return entity.type == "character"
+    elseif inventory_index == defines.inventory.artillery_turret_ammo then
+        return entity.type == "artillery-turret"
+            and settings.global[AMMO_LOADER_ARTILLERY_SETTING].value
+            and is_ammo_loader_tech_available(entity.force, AMMO_LOADER_ARTILLERY_TECH)
+    elseif inventory_index == defines.inventory.artillery_wagon_ammo then
+        return entity.type == "artillery-wagon"
+            and settings.global[AMMO_LOADER_ARTILLERY_SETTING].value
+            and is_ammo_loader_tech_available(entity.force, AMMO_LOADER_ARTILLERY_TECH)
+    elseif inventory_index == defines.inventory.fuel then
+        if not entity.burner then return false end
+        if not is_ammo_loader_tech_available(entity.force, AMMO_LOADER_BURNERS_TECH) then return false end
+        if entity.type == "car" or entity.type == "locomotive" then
+            if not is_ammo_loader_tech_available(entity.force, AMMO_LOADER_VEHICLES_TECH) then return false end
+        elseif not AMMO_LOADER_MOVING_ENTITY_TYPES[entity.type]
+            and not settings.global[AMMO_LOADER_BURNER_STRUCTURES_SETTING].value then
+            return false
+        end
+        if entity.type == "locomotive" and not settings.global[AMMO_LOADER_TRAINS_SETTING].value then
+            return false
+        end
+        return true
+    elseif inventory_index == defines.inventory.roboport_material then
+        return entity.name == "repair-turret"
+    end
+
+    return false
+end
+
 ---@param entity LuaEntity
 ---@param player_index? int id of a player who placed the order
 ---@return boolean --returns false if defabrication failed AND we'll need to retry later; true otherwise
@@ -55,33 +215,35 @@ function instant_detileation()
     for surface_index, surface_data in pairs(storage.surface_data.planets) do
         local surface = surface_data.surface
         local tiles = surface.find_tiles_filtered({to_be_deconstructed = true})
-        local final_tiles = {}
-        local indices = {}
-        local final_index = 1
-        for _, tile in pairs(tiles) do
-            local hidden_tile = tile.hidden_tile
-            local double_hidden_tile = tile.double_hidden_tile
-            if hidden_tile then
-                final_tiles[final_index] = {
-                    name = hidden_tile,
-                    position = tile.position,
-                    double_hidden_tile = double_hidden_tile
-                }
-                final_index = final_index + 1
+        if next(tiles) then
+            local final_tiles = {}
+            local indices = {}
+            local final_index = 1
+            for _, tile in pairs(tiles) do
+                local hidden_tile = tile.hidden_tile
+                local double_hidden_tile = tile.double_hidden_tile
+                if hidden_tile then
+                    final_tiles[final_index] = {
+                        name = hidden_tile,
+                        position = tile.position,
+                        double_hidden_tile = double_hidden_tile
+                    }
+                    final_index = final_index + 1
+                end
+                indices[storage.tile_link[tile.name]] = (indices[storage.tile_link[tile.name]] or 0) + 1
             end
-            indices[storage.tile_link[tile.name]] = (indices[storage.tile_link[tile.name]] or 0) + 1
+            surface.set_tiles(final_tiles, true, true, true, true)
+            set_hidden_tiles(surface, final_tiles)
+            add_to_storage(indices, surface_index)
         end
-        surface.set_tiles(final_tiles, true, true, true, true)
-        set_hidden_tiles(surface, final_tiles)
-        add_to_storage(indices, surface_index)
     end
 end
 
 ---@param qs_item QSItem
 function decraft(qs_item)
-    local recipe = qf_utils.get_craftable_recipe(qs_item, nil, true)
-    if recipe then
-        qf_utils.fabricate_recipe(recipe, qs_item.quality, qs_item.surface_index, nil, qs_item.count, true)
+    local recipe, craftable_count = qf_utils.get_craftable_recipe(qs_item, nil, true, true)
+    if recipe and craftable_count > 0 then
+        qf_utils.fabricate_recipe(recipe, qs_item.quality, qs_item.surface_index, nil, qs_item.count, true, craftable_count)
     end
 end
 
@@ -105,7 +267,16 @@ function process_inventory(entity, player_inventory, surface_index)
                     quality = item.quality,
                     surface_index = surface_index
                 }
-                qs_utils.add_to_player_inventory(player_inventory, qs_item)
+                if is_ammo_loader_tracked_inventory(entity, i) then
+                    local inserted = add_to_ammo_loader_system(entity, i, qs_item)
+                    if inserted > 0 then
+                        inventory.remove({name = qs_item.name, count = inserted, quality = qs_item.quality})
+                    end
+                    qs_item.count = qs_item.count - inserted
+                end
+                if qs_item.count > 0 then
+                    qs_utils.add_to_player_inventory(player_inventory, qs_item)
+                end
             end
         end
     end

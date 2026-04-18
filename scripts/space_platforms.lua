@@ -231,6 +231,7 @@ end
 if settings.startup["qf-enable-space-transfer"].value then
     ---Special space-specific countdown handling.
     script.on_nth_tick(17, function(event)
+        if not storage.qf_enabled then return end
         for type, countdown in pairs(storage.space_countdowns) do
             if countdown then
                 storage.space_countdowns[type] = storage.space_countdowns[type] - 1
@@ -246,6 +247,7 @@ if settings.startup["qf-enable-space-transfer"].value then
 end
 
 function on_entity_logistic_slot_changed(event)
+    if not storage.qf_enabled then return end
     local entity = event.entity
     if entity.valid and entity.type == "space-platform-hub" then
         storage.space_countdowns.space_sendoff = 5
@@ -253,6 +255,7 @@ function on_entity_logistic_slot_changed(event)
 end
 
 function on_space_platform_changed_state(event)
+    if not storage.qf_enabled then return end
     local old_state = event.old_state
     local state = event.platform.state
     if old_state == defines.space_platform_state.on_the_path and state == defines.space_platform_state.waiting_at_station then

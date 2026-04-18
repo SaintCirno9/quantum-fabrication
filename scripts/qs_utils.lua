@@ -14,6 +14,22 @@ local utils = require("scripts/utils")
 
 ---@class qs_utils
 local qs_utils = {}
+local decraft_queue_batch_size = 2
+local decraft_queue_item_max_count = 64
+
+local function ensure_decraft_queue_storage()
+    if not storage.decraft_queue then
+        storage.decraft_queue = {}
+    end
+    if not storage.request_ids then
+        storage.request_ids = {}
+    end
+    return storage.decraft_queue
+end
+
+local function get_decraft_queue_key(surface_index, item_name, quality_name)
+    return surface_index .. "|" .. item_name .. "|" .. quality_name
+end
 
 
 ---@param qs_item QSItem
@@ -23,6 +39,79 @@ function qs_utils.add_to_storage(qs_item, try_defabricate, count_override)
     if not qs_item then return end
     storage.fabricator_inventory[qs_item.surface_index][qs_item.type][qs_item.name][qs_item.quality] = storage.fabricator_inventory[qs_item.surface_index][qs_item.type][qs_item.name][qs_item.quality] + (count_override or qs_item.count)
     if try_defabricate and settings.global["qf-allow-decrafting"].value and not storage.tiles[qs_item.name] then decraft(qs_item) end
+end
+
+---@param surface_index uint
+---@param item_name string
+---@param quality_name string
+---@param count uint
+function qs_utils.queue_decraft(surface_index, item_name, quality_name, count)
+    if count <= 0 or not settings.global["qf-allow-decrafting"].value then return end
+    if not utils.is_placeable(item_name) or storage.tiles[item_name] then return end
+    local queue = ensure_decraft_queue_storage()
+    local queue_key = get_decraft_queue_key(surface_index, item_name, quality_name)
+    local queued_item = queue[queue_key]
+    if queued_item then
+        queued_item.count = queued_item.count + count
+        return
+    end
+    queue[queue_key] = {
+        surface_index = surface_index,
+        name = item_name,
+        count = count,
+        type = "item",
+        quality = quality_name,
+    }
+end
+
+---@param batch_size? uint
+function qs_utils.process_decraft_queue(batch_size)
+    local queue = ensure_decraft_queue_storage()
+    local request_id_key = "decraft-queue"
+    if not next(queue) then
+        storage.request_ids[request_id_key] = nil
+        return
+    end
+
+    local current_key = storage.request_ids[request_id_key]
+    if current_key and not queue[current_key] then
+        current_key = nil
+    end
+    if not current_key then
+        current_key = next(queue)
+    end
+
+    local processed = 0
+    local processing_batch_size = batch_size or decraft_queue_batch_size
+    while current_key and processed < processing_batch_size do
+        local key = current_key
+        current_key = next(queue, key)
+        local queued_item = queue[key]
+        if queued_item then
+            if not utils.is_placeable(queued_item.name) or storage.tiles[queued_item.name] then
+                queue[key] = nil
+            else
+                local process_count = math.min(queued_item.count, decraft_queue_item_max_count)
+                if process_count > 0 then
+                    decraft({
+                        surface_index = queued_item.surface_index,
+                        name = queued_item.name,
+                        count = process_count,
+                        type = "item",
+                        quality = queued_item.quality,
+                    })
+                end
+                if queued_item.count > process_count then
+                    queued_item.count = queued_item.count - process_count
+                else
+                    queue[key] = nil
+                end
+            end
+        end
+        processed = processed + 1
+    end
+
+    storage.request_ids[request_id_key] = current_key
 end
 
 

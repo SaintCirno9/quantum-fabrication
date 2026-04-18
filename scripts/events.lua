@@ -98,7 +98,12 @@ function on_init()
         destroys = 1,
         upgrades = 1,
         repairs = 1,
+        item_proxies_dirty = 1,
         ["digitizer-chest"] = 1,
+        ["digitizer-chest-signal"] = 1,
+        ["digitizer-chest-active"] = 1,
+        ["digitizer-chest-idle"] = 1,
+        ["digitizer-chest-long_idle"] = 1,
     }
     storage.request_player_ids = {
         revivals = 1,
@@ -112,6 +117,14 @@ function on_init()
         ["digitizer-chest"] = {},
         ["dedigitizer-reactor"] = {},
         ["qf-storage-reader"] = {},
+    }
+    storage.tracked_entity_queues = {
+        ["digitizer-chest"] = {
+            signal = {},
+            active = {},
+            idle = {},
+            long_idle = {},
+        },
     }
     ---@type { platforms: SurfaceData[], planets: SurfaceData[] }
     storage.surface_data = {
@@ -164,6 +177,9 @@ function on_player_created(event)
 end
 
 function on_config_changed()
+    if storage.qf_enabled == nil then
+        storage.qf_enabled = true
+    end
     for _, player in pairs(game.players) do
         storage.player_gui[player.index].translation_complete = false
         storage.player_gui[player.index].filtered_data_ok = false
@@ -175,6 +191,7 @@ function on_config_changed()
     process_data()
     process_sorted_lists()
     tracking.recheck_trackable_entities()
+    tracking.rebuild_digitizer_chest_queues()
 end
 
 function on_mod_settings_changed(event)
@@ -290,9 +307,14 @@ function on_built_entity(event)
         player_index = nil
     end
     if entity and entity.valid then
+        chunks_utils.add_chunk(entity.surface_index, entity.position)
         if entity.type == "entity-ghost" then
-            storage.countdowns.revivals = 2
-            storage.request_player_ids.revivals = player_index
+            tracking.create_tracked_request({
+                request_type = "revivals",
+                entity = entity,
+                player_index = player_index
+            })
+            storage.space_countdowns.space_sendoff = 2
         elseif entity.type == "tile-ghost" then
             storage.countdowns.tile_creation = 10
             storage.request_player_ids.tiles = player_index
@@ -336,8 +358,12 @@ function on_marked_for_deconstruction(event)
             if storage.prototypes_data[entity.name] then
                 local item_name = storage.prototypes_data[entity.name].item_name
                 if utils.is_placeable(item_name) then
-                    storage.countdowns.destroys = 2
-                    storage.request_player_ids.destroys = player_index
+                    tracking.create_tracked_request({
+                        request_type = "destroys",
+                        entity = entity,
+                        player_index = player_index
+                    })
+                    storage.space_countdowns.space_sendoff = 2
                 end
             elseif entity.type == "deconstructible-tile-proxy" then
                 storage.countdowns.tile_removal = 10
@@ -373,8 +399,12 @@ function on_upgrade(event)
         player_index = nil
     end
     if entity and entity.valid then
-        storage.countdowns.upgrades = 2
-        storage.request_player_ids.upgrades = player_index
+        tracking.create_tracked_request({
+            request_type = "upgrades",
+            entity = entity,
+            player_index = player_index
+        })
+        storage.space_countdowns.space_sendoff = 2
     end
 end
 
@@ -397,6 +427,7 @@ end
 function on_entity_cloned(event)
     local source = event.source
     local destination = event.destination
+    chunks_utils.add_chunk(destination.surface_index, destination.position)
     if Cloneable_entities[source.name] then
         tracking.clone_settings(source, destination)
     end
@@ -405,6 +436,7 @@ end
 function on_entity_settings_pasted(event)
     local source = event.source
     local destination = event.destination
+    chunks_utils.add_chunk(destination.surface_index, destination.position)
     if Cloneable_entities[source.name] and source.name == destination.name then
         tracking.clone_settings(source, destination)
     end
@@ -429,8 +461,31 @@ function on_player_joined_game(event)
     flib_dictionary.on_player_joined_game(event)
 end
 
+function on_player_fast_transferred(event)
+    if not event.from_player then return end
+    local entity = event.entity
+    if not entity or not entity.valid then return end
+
+    if entity.name ~= "digitizer-chest"
+        and entity.name ~= "digitizer-passive-provider-chest"
+        and entity.name ~= "digitizer-requester-chest" then
+        return
+    end
+
+    local entity_data = tracking.get_entity_data(entity)
+    if not entity_data then
+        tracking.create_tracked_request({request_type = "entities", entity = entity, player_index = event.player_index})
+        entity_data = tracking.get_entity_data(entity)
+    end
+    if not entity_data then return end
+
+    tracking.update_entity(entity_data)
+end
+
 function on_tick(event)
     flib_dictionary.on_tick(event)
+    qs_utils.process_decraft_queue(1)
+    if storage.qf_enabled == false then return end
     tracking.on_tick_update_requests()
     tracking.update_lost_module_requests_neo()
 end
@@ -472,12 +527,45 @@ script.on_nth_tick(338, function(event)
     end
 end)
 
+function repair_tracking()
+    utils.validate_surfaces()
+    tracking.recheck_trackable_entities(true)
+    tracking.rebuild_digitizer_chest_queues()
+    tracking.recheck_all_item_request_proxies()
+    register_request_table("revivals")
+    register_request_table("destroys")
+    register_request_table("upgrades")
+
+    if not storage.countdowns.tile_creation then
+        for _, surface_data in pairs(storage.surface_data.planets) do
+            if surface_data.surface.count_entities_filtered({name = "tile-ghost"}) > 0 then
+                storage.countdowns.tile_creation = 2
+                break
+            end
+        end
+    end
+
+    if not storage.countdowns.tile_removal then
+        for _, surface_data in pairs(storage.surface_data.planets) do
+            if surface_data.surface.count_entities_filtered({type = "deconstructible-tile-proxy", force = "player"}) > 0 then
+                storage.countdowns.tile_removal = 2
+                break
+            end
+        end
+    end
+
+    storage.space_countdowns.space_sendoff = 2
+end
+
 function on_console_command(command)
     local player_index = command.player_index
     local name = command.name
     if name == "qf_hesoyam" then
         debug_storage(250000)
         game.print("CHEAT: Fabricator inventory updated")
+    elseif name == "qf_repair_tracking" then
+        repair_tracking()
+        game.print("Tracking repair finished")
     elseif name == "qf_update_module_requests" then
         ---@diagnostic disable-next-line: param-type-mismatch
         tracking.update_lost_module_requests(game.get_player(player_index))
@@ -498,6 +586,10 @@ function on_console_command(command)
         process_unpacking()
         process_ingredient_filter()
         Product_craft_data_anti_overwrite_flag = false
+    elseif name == "qf_dump_digitizer_queues" then
+        local limit = tonumber(command.parameter)
+        tracking.dump_digitizer_chest_queues(limit)
+        game.print("Digitizer queue dump written to factorio-current.log")
     end
 end
 
@@ -523,10 +615,12 @@ function on_lua_shortcut(event)
 end
 
 commands.add_command("qf_update_module_requests", nil, on_console_command)
+commands.add_command("qf_repair_tracking", nil, on_console_command)
 commands.add_command("qf_hesoyam", nil, on_console_command)
 commands.add_command("qf_hesoyam_harder", nil, on_console_command)
 commands.add_command("qf_debug_command", nil, on_console_command)
 commands.add_command("qf_reprocess_recipes", nil, on_console_command)
+commands.add_command("qf_dump_digitizer_queues", nil, on_console_command)
 
 script.on_nth_tick(11, function(event)
     if storage.qf_enabled then
@@ -537,9 +631,6 @@ script.on_nth_tick(11, function(event)
                     storage.countdowns[type] = nil
                     if type == "tile_creation" then
                         instant_tileation()
-                        storage.space_countdowns.space_sendoff = 2
-                    elseif type == "revivals" or type == "destroys" or type == "upgrades" then
-                        register_request_table(type)
                         storage.space_countdowns.space_sendoff = 2
                     elseif type == "temp_statistics" then
                         qs_utils.add_production_statistics()
@@ -554,15 +645,13 @@ script.on_nth_tick(11, function(event)
     end
 end)
 
-script.on_nth_tick(Update_rate.reactors, tracking.update_tracked_reactors)
-
-
 script.on_event(defines.events.on_runtime_mod_setting_changed, on_mod_settings_changed)
 script.on_init(on_init)
 script.on_configuration_changed(on_config_changed)
 
 script.on_event(defines.events.on_string_translated, on_string_translated)
 script.on_event(defines.events.on_player_joined_game, on_player_joined_game)
+script.on_event(defines.events.on_player_fast_transferred, on_player_fast_transferred)
 script.on_event(defines.events.on_tick, on_tick)
 
 script.on_event("qf-fabricator-gui-search", on_fabricator_gui_search_event)

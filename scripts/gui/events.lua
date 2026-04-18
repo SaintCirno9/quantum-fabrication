@@ -122,6 +122,9 @@ function on_gui_click(event)
     elseif element.name == "update_module_requests_button" then
         tracking.update_lost_module_requests(player)
         game.print("Updating item request proxy tracking")
+    elseif element.name == "repair_tracking_button" then
+        repair_tracking()
+        game.print("Tracking repair finished")
     elseif element.name == "qf_intake_limit_button" then
         storage.options.default_intake_limit = storage.tracked_entities["digitizer-chest"][element_tags.unit_number].settings.intake_limit
         storage.options.default_decraft = storage.tracked_entities["digitizer-chest"][element_tags.unit_number].settings.decraft
@@ -136,7 +139,7 @@ function on_gui_opened(event)
     local player = game.get_player(event.player_index)
     if not player then return end
 
-    if entity.name == "digitizer-chest" then
+    if entity.name == "digitizer-chest" or entity.name == "digitizer-passive-provider-chest" or entity.name == "digitizer-requester-chest" then
         create_digitizer_chest_gui(player, entity)
     elseif entity.name == "dedigitizer-reactor" then
         create_dedigitizer_reactor_gui(player, entity)

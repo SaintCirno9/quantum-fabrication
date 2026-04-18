@@ -10,10 +10,17 @@ local qf_utils = {}
 ---@param surface_index uint
 ---@param player_inventory? LuaInventory
 ---@param multiply_by_product_amount? boolean
+---@param decraft? boolean
 ---@return uint
-function qf_utils.how_many_can_craft(recipe, quality, surface_index, player_inventory, multiply_by_product_amount)
+function qf_utils.how_many_can_craft(recipe, quality, surface_index, player_inventory, multiply_by_product_amount, decraft)
+    local ingredients = recipe.ingredients
+    local products = recipe.products
+    if decraft then
+        ingredients = recipe.products
+        products = recipe.ingredients
+    end
     local result
-    for _, ingredient in pairs(recipe.ingredients) do
+    for _, ingredient in pairs(ingredients) do
         local qs_item = {
             name = ingredient.name,
             count = ingredient.amount,
@@ -37,7 +44,7 @@ function qf_utils.how_many_can_craft(recipe, quality, surface_index, player_inve
     end
     if not result then return 9999999 end
     if multiply_by_product_amount then
-        for _, product in pairs(recipe.products) do
+        for _, product in pairs(products) do
             if product.amount > 1 and utils.is_placeable(product.name) then
                 result = result * product.amount
                 break
@@ -80,17 +87,22 @@ end
 ---@param qs_item QSItem
 ---@param player_inventory? LuaInventory
 ---@param decraft? boolean
+---@param return_craftable_count? boolean
 ---@return table | nil
-function qf_utils.get_craftable_recipe(qs_item, player_inventory, decraft)
+function qf_utils.get_craftable_recipe(qs_item, player_inventory, decraft, return_craftable_count)
     local item_name = qs_item.name
     local recipes = storage.product_craft_data[item_name]
     local unpacked_recipes = storage.unpacked_recipes
     if not recipes then return nil end
     for i = 1, recipes[1].number_of_recipes do
         local recipe = unpacked_recipes[recipes[i].recipe_name]
-        if recipe.enabled then
-            if qf_utils.is_recipe_craftable(recipe, qs_item.quality, qs_item.surface_index, player_inventory, decraft)
-                and not recipes[i].blacklisted then
+        if recipe.enabled and not recipes[i].blacklisted then
+            if return_craftable_count then
+                local craftable_count = qf_utils.how_many_can_craft(recipe, qs_item.quality, qs_item.surface_index, player_inventory, false, decraft)
+                if craftable_count > 0 then
+                    return recipe, craftable_count
+                end
+            elseif qf_utils.is_recipe_craftable(recipe, qs_item.quality, qs_item.surface_index, player_inventory, decraft) then
                 return recipe
             end
         end
@@ -115,7 +127,8 @@ end
 ---@param player_inventory? LuaInventory
 ---@param multiplier? int
 ---@param decraft? boolean
-function qf_utils.fabricate_recipe(recipe, quality, surface_index, player_inventory, multiplier, decraft)
+---@param max_craftable_override? uint
+function qf_utils.fabricate_recipe(recipe, quality, surface_index, player_inventory, multiplier, decraft, max_craftable_override)
     local ingredients = recipe.ingredients
     local products = recipe.products
     if decraft then
@@ -124,10 +137,15 @@ function qf_utils.fabricate_recipe(recipe, quality, surface_index, player_invent
     end
 
     if multiplier and multiplier ~= 1 then
-        multiplier = math.min(multiplier, qf_utils.how_many_can_craft({ingredients = ingredients, products = products}, quality, surface_index, player_inventory))
+        local max_craftable = max_craftable_override
+        if max_craftable == nil then
+            max_craftable = qf_utils.how_many_can_craft(recipe, quality, surface_index, player_inventory, false, decraft)
+        end
+        multiplier = math.min(multiplier, max_craftable)
     else
         multiplier = 1
     end
+    if multiplier <= 0 then return end
 
     for _, ingredient in pairs(ingredients) do
         local qs_item = {

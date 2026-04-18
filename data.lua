@@ -1,6 +1,7 @@
 require "prototypes/custom-input"
 require "prototypes/styles"
 require "prototypes/digitizer-chest"
+require "prototypes/digitizer-logistic-chests"
 require "prototypes/dedigitizer-reactor"
 require "prototypes/storage-reader"
 require "prototypes/shortcuts"
