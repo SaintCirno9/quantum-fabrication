@@ -99,13 +99,18 @@ function on_gui_click(event)
             count = 1,
             type = "item",
             quality = storage.player_gui[event.player_index].quality.name,
-            surface_index = player.physical_surface_index
+            surface_index = element_tags.storage_index or player.physical_surface_index
         }
         qs_utils.take_from_storage(qs_item, player, requested_stacks, take_all)
     elseif element_tags.button_type == "take_out_ghost" then
         player.clear_cursor()
         player.cursor_ghost = {name = element_tags.item_name, quality = storage.player_gui[event.player_index].quality.name}
         toggle_qf_gui(player)
+    elseif element_tags.button_type == "storage_view_mode" then
+        if storage.player_gui[event.player_index].space_storage_mode ~= element_tags.mode then
+            storage.player_gui[event.player_index].space_storage_mode = element_tags.mode
+            build_main_storage_gui(player, player.gui.screen.qf_fabricator_frame.main_content_flow.storage_flow)
+        end
     elseif element.name == "qf_options_button" then
         toggle_options_gui(player)
     elseif element.name == "qf_reprocess_recipes_button" then
@@ -248,6 +253,9 @@ function on_gui_selection_state_changed(event)
     elseif element.name == "qf_quality_selection_dropdown" then
         storage.player_gui[event.player_index].quality.index = element.selected_index
         storage.player_gui[event.player_index].quality.name = utils.get_qualities()[element.selected_index].name
+        if storage.player_gui[event.player_index].show_storage then
+            build_main_storage_gui(player, player.gui.screen.qf_fabricator_frame.main_content_flow.storage_flow)
+        end
         build_main_recipe_item_list_gui(player, player.gui.screen.qf_fabricator_frame.main_content_flow.recipe_flow.recipe_flow)
     elseif element.name == "qf_choose_surface_dropdown" then
         storage.tracked_entities["dedigitizer-reactor"][tags.unit_number].settings.surface_index = tags.surface_link[element.selected_index]

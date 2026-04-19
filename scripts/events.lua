@@ -5,6 +5,43 @@ local tracking = require("scripts/tracking_utils")
 local flib_table = require("__flib__.table")
 local chunks_utils = require("scripts/chunks_utils")
 
+local function tables_equal(first, second)
+    if first == second then return true end
+    if type(first) ~= type(second) then return false end
+    if type(first) ~= "table" then return false end
+
+    for key, value in pairs(first) do
+        if not tables_equal(value, second[key]) then return false end
+    end
+
+    for key, _ in pairs(second) do
+        if first[key] == nil then return false end
+    end
+
+    return true
+end
+
+local function bar_changed(source, destination)
+    if source.type ~= "container" and source.type ~= "logistic-container" then return false end
+
+    local source_inventory = source.get_inventory(defines.inventory.chest)
+    local destination_inventory = destination.get_inventory(defines.inventory.chest)
+    if not source_inventory or not destination_inventory then return false end
+    if not source_inventory.supports_bar() or not destination_inventory.supports_bar() then return false end
+
+    return source_inventory.get_bar() ~= destination_inventory.get_bar()
+end
+
+local function should_play_settings_paste_sound(source, destination)
+    local source_data = tracking.get_entity_data(source)
+    local destination_data = tracking.get_entity_data(destination)
+    if not source_data or not destination_data then return false end
+    if tables_equal(source_data.settings, destination_data.settings) then return false end
+    if bar_changed(source, destination) then return false end
+
+    return true
+end
+
 ---@class QSPrototypeData
 ---@field name string
 ---@field type string
@@ -170,10 +207,103 @@ function on_player_created(event)
                 mark_red = true,
                 sort_ingredients = 1
             },
+            space_storage_mode = "planet",
             gui = {},
             translation_complete = false,
             filtered_data_ok = false,
+            digitizer_hover_render_id = nil,
+            digitizer_hover_unit_number = nil,
+            digitizer_hover_text = nil,
         }
+    end
+end
+
+local Digitizer_queue_display_names = {
+    signal = "信号",
+    active = "活跃",
+    idle = "空闲",
+    long_idle = "深度空闲",
+}
+
+local function destroy_digitizer_hover_text(player_index)
+    local player_data = storage.player_gui[player_index]
+    if not player_data then return end
+
+    local render_id = player_data.digitizer_hover_render_id
+    if render_id then
+        local render_object = rendering.get_object_by_id(render_id)
+        if render_object then
+            render_object.destroy()
+        end
+    end
+
+    player_data.digitizer_hover_render_id = nil
+    player_data.digitizer_hover_unit_number = nil
+    player_data.digitizer_hover_text = nil
+end
+
+local function update_digitizer_hover_text(player_index)
+    local player = game.get_player(player_index)
+    if not player or not player.valid then return end
+
+    local player_data = storage.player_gui[player_index]
+    if not player_data then return end
+
+    local selected = player.selected
+    if not selected or not selected.valid then
+        destroy_digitizer_hover_text(player_index)
+        return
+    end
+
+    local entity_data = tracking.get_entity_data(selected)
+    if not entity_data or entity_data.name ~= "digitizer-chest" then
+        destroy_digitizer_hover_text(player_index)
+        return
+    end
+
+    local queue_name = entity_data.queue_name or "active"
+    local full_pass_seconds = tracking.get_digitizer_queue_full_pass_seconds(queue_name)
+    local queue_text = "队列: " .. (Digitizer_queue_display_names[queue_name] or queue_name) .. " " .. string.format("%.2fS", full_pass_seconds)
+    local render_object = player_data.digitizer_hover_render_id and rendering.get_object_by_id(player_data.digitizer_hover_render_id)
+
+    if not render_object or player_data.digitizer_hover_unit_number ~= selected.unit_number then
+        destroy_digitizer_hover_text(player_index)
+        render_object = rendering.draw_text{
+            text = queue_text,
+            surface = selected.surface,
+            target = {
+                entity = selected,
+                offset = {0, -1.75},
+            },
+            color = {r = 1, g = 1, b = 1},
+            alignment = "center",
+            vertical_alignment = "middle",
+            players = {player_index},
+            scale = 1.1,
+        }
+        player_data.digitizer_hover_render_id = render_object.id
+        player_data.digitizer_hover_unit_number = selected.unit_number
+        player_data.digitizer_hover_text = queue_text
+        return
+    end
+
+    if player_data.digitizer_hover_text ~= queue_text then
+        render_object.text = queue_text
+        player_data.digitizer_hover_text = queue_text
+    end
+end
+
+function on_selected_entity_changed(event)
+    update_digitizer_hover_text(event.player_index)
+end
+
+function on_pre_player_left_game(event)
+    destroy_digitizer_hover_text(event.player_index)
+end
+
+local function refresh_digitizer_hover_texts()
+    for _, player in pairs(game.connected_players) do
+        update_digitizer_hover_text(player.index)
     end
 end
 
@@ -187,6 +317,9 @@ function on_config_changed()
         storage.qf_enabled = true
     end
     for _, player in pairs(game.players) do
+        if storage.player_gui[player.index].space_storage_mode == nil then
+            storage.player_gui[player.index].space_storage_mode = "planet"
+        end
         storage.player_gui[player.index].translation_complete = false
         storage.player_gui[player.index].filtered_data_ok = false
         local main_frame = player.gui.screen.qf_fabricator_frame
@@ -449,7 +582,12 @@ function on_entity_settings_pasted(event)
     local destination = event.destination
     chunks_utils.add_chunk(destination.surface_index, destination.position)
     if Cloneable_entities[source.name] and source.name == destination.name then
+        local play_paste_sound = event.player_index and should_play_settings_paste_sound(source, destination)
         tracking.clone_settings(source, destination)
+        if play_paste_sound then
+            local player = game.get_player(event.player_index)
+            if player then player.play_sound{path = "utility/entity_settings_pasted"} end
+        end
     end
 end
 
@@ -537,6 +675,10 @@ script.on_nth_tick(338, function(event)
     end
 end)
 
+script.on_nth_tick(29, function(event)
+    refresh_digitizer_hover_texts()
+end)
+
 function repair_tracking()
     utils.validate_surfaces()
     tracking.recheck_trackable_entities(true)
@@ -599,8 +741,8 @@ function on_console_command(command)
         Product_craft_data_anti_overwrite_flag = false
     elseif name == "qf_dump_digitizer_queues" then
         local limit = tonumber(command.parameter)
-        tracking.dump_digitizer_chest_queues(limit)
-        game.print("Digitizer queue dump written to factorio-current.log")
+        tracking.dump_digitizer_chest_queues(limit, player_index)
+        game.print("Digitizer queue dump printed to chat")
     end
 end
 
@@ -662,7 +804,9 @@ script.on_configuration_changed(on_config_changed)
 
 script.on_event(defines.events.on_string_translated, on_string_translated)
 script.on_event(defines.events.on_player_joined_game, on_player_joined_game)
+script.on_event(defines.events.on_pre_player_left_game, on_pre_player_left_game)
 script.on_event(defines.events.on_player_fast_transferred, on_player_fast_transferred)
+script.on_event(defines.events.on_selected_entity_changed, on_selected_entity_changed)
 script.on_event(defines.events.on_tick, on_tick)
 
 script.on_event("qf-fabricator-gui-search", on_fabricator_gui_search_event)

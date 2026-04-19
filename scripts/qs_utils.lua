@@ -425,8 +425,6 @@ function qs_utils.take_from_storage(qs_item, player, requested_stacks, take_all)
     local in_storage = qs_utils.count_in_storage(qs_item)
     if in_storage <= 0 then return end
     local quality_name = qs_item.quality
-    local player_inventory = utils.get_player_inventory(player)
-    if not player_inventory then return end
     local amount_to_take = in_storage
     if not take_all then
         amount_to_take = prototype.stack_size * (requested_stacks or 1)
@@ -434,9 +432,15 @@ function qs_utils.take_from_storage(qs_item, player, requested_stacks, take_all)
     if in_storage < amount_to_take then
         amount_to_take = in_storage
     end
-    local inserted = player_inventory.insert({name = item_name, count = amount_to_take, quality = quality_name})
-    qs_utils.remove_from_storage(qs_item, inserted)
-    update_removal_tab_label(player, item_name, quality_name)
+    qs_item.count = amount_to_take
+    if player.surface.platform and qs_item.surface_index == player.surface.index and player.surface.platform.hub then
+        qs_utils.pull_from_storage(qs_item, player.surface.platform.hub)
+    else
+        local player_inventory = utils.get_player_inventory(player)
+        if not player_inventory then return end
+        qs_utils.pull_from_storage(qs_item, player_inventory)
+    end
+    update_removal_tab_label(player, item_name, quality_name, qs_item.surface_index)
 end
 
 ---Adds item to temp table for statistics

@@ -48,7 +48,7 @@ function build_main_gui(player)
 
     build_main_recipe_gui(player, recipe_flow)
 
-    if storage.player_gui[player.index].show_storage and (not player.surface.platform or player.surface.platform.space_location) then
+    if storage.player_gui[player.index].show_storage then
         build_main_storage_gui(player, storage_flow)
         storage_flow.visible = true
     end
@@ -127,7 +127,6 @@ function build_titlebar(player, titlebar_flow_parent)
         else
             titlebar_caption = {"", {"qf-inventory.recipe-frame-title-ghost"}, ": ", {"surface-name.space-platform"}}
             toggle_storage_tooltip = {"qf-inventory.toggle-storage-button-tooltip-platform"}
-            toggle_storage_button.enabled = false
         end
     else
         if surface.planet then

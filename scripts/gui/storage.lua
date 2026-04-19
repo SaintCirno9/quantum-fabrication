@@ -2,6 +2,26 @@ local utils = require("scripts/utils")
 local flib_format = require("__flib__.format")
 local qf_utils = require("scripts/qf_utils")
 
+local function get_storage_view_mode(player)
+    if not player.surface.platform then
+        return "planet"
+    end
+    return storage.player_gui[player.index].space_storage_mode or "planet"
+end
+
+local function get_storage_view_index(player)
+    if not player.surface.platform then
+        return get_storage_index(nil, player)
+    end
+
+    local storage_mode = get_storage_view_mode(player)
+    if storage_mode == "platform" then
+        return player.surface.index
+    end
+
+    return get_storage_index(nil, player)
+end
+
 ---comment
 ---@param player LuaPlayer
 ---@param storage_flow_parent LuaGuiElement
@@ -21,13 +41,34 @@ function build_main_storage_gui(player, storage_flow_parent)
     }
     storage_titlebar.style.height = QF_GUI.titlebar.height
 
-    local storage_index = get_storage_index(nil, player)
+    local storage_index = get_storage_view_index(player)
+    local storage_mode = get_storage_view_mode(player)
 
     storage_titlebar.add{
         type = "label",
         caption = {"", {"qf-inventory.storage-frame-title"}, " #", storage_index},
         style = "frame_title"
     }
+    if player.surface.platform then
+        local platform_button = storage_titlebar.add{
+            type = "button",
+            name = "qf_storage_view_platform_button",
+            caption = "平台仓",
+            style = "frame_action_button",
+            tags = {button_type = "storage_view_mode", mode = "platform"}
+        }
+        platform_button.toggled = storage_mode == "platform"
+
+        local planet_button = storage_titlebar.add{
+            type = "button",
+            name = "qf_storage_view_planet_button",
+            caption = "星球仓",
+            style = "frame_action_button",
+            tags = {button_type = "storage_view_mode", mode = "planet"}
+        }
+        planet_button.toggled = storage_mode == "planet"
+        planet_button.enabled = player.surface.platform.space_location ~= nil
+    end
     local draggable_space = storage_titlebar.add{
         type = "empty-widget",
         style = "draggable_space",
@@ -38,7 +79,7 @@ function build_main_storage_gui(player, storage_flow_parent)
     storage_titlebar.drag_target = player.gui.screen.qf_fabricator_frame
 
     
-    if player.surface.platform then
+    if player.surface.platform and storage_mode == "planet" and storage_index and storage.surface_data.planets[storage_index] then
         ---@diagnostic disable-next-line: param-type-mismatch
         local rocket_silo = storage.surface_data.planets[storage_index].rocket_silo
         if not rocket_silo or not rocket_silo.valid or not rocket_silo.get_recipe() then
@@ -100,10 +141,14 @@ function build_tab(player, parent_frame)
     content_table.style.vertical_spacing = 0
     content_table.style.bottom_margin = 8
 
-    local storage_index = get_storage_index(nil, player)
+    local storage_index = get_storage_view_index(player)
 
     -- We can't take out items from space platforms and different planets
-    local allow_take_out = not player.surface.platform and storage_index == player.physical_surface_index and settings.global["qf-allow-pulling-out"].value
+    local allow_take_out = settings.global["qf-allow-pulling-out"].value
+        and (
+            (not player.surface.platform and storage_index == player.physical_surface_index)
+            or (player.surface.platform and storage_index == player.surface.index and player.surface.platform.hub)
+        )
 
     local sorted_list = storage.sorted_lists[player.index]
     local fabricator_inventory = storage.fabricator_inventory[storage_index]
@@ -117,6 +162,8 @@ function build_tab(player, parent_frame)
             local amount_captions = {}
             local index = 0
             local temp_max_qualities = 0
+            local selected_quality_name = storage.player_gui[player.index].quality.name
+            local selected_quality_amount = fabricator_inventory[item_type][item_name][selected_quality_name] or 0
             for _, quality in pairs(qualities) do
                 if item.type == "item" or quality.name == QS_DEFAULT_QUALITY then
                     local amount = fabricator_inventory[item_type][item_name][quality.name]
@@ -192,11 +239,11 @@ function build_tab(player, parent_frame)
             end
             
             local placeables_final_flow = content_table.add{type = "flow", direction = "horizontal"}
-            if allow_take_out and item_type == "item" then
-                local take_out_caption = {"qf-inventory.take-out-item-quality"}
+            if allow_take_out and item_type == "item" and selected_quality_amount > 0 then
+                local take_out_caption = {"", {"qf-inventory.take-out-item-quality"}, " (", {"quality-name." .. selected_quality_name}, ")"}
                 if not script.feature_flags["quality"] then take_out_caption = {"qf-inventory.take-out-item"} end
                 local button_sprite = "qf-vanilla-ghost-entity-icon"
-                local button_tags = {button_type = "take_out_item", item_name = item.name}
+                local button_tags = {button_type = "take_out_item", item_name = item.name, storage_index = storage_index}
                 local item_take_out_button = placeables_final_flow.add{
                     type = "sprite-button",
                     style = "frame_action_button",
@@ -218,9 +265,10 @@ function build_tab(player, parent_frame)
     end
 end
 
-function update_removal_tab_label(player, item_name, quality_name)
+function update_removal_tab_label(player, item_name, quality_name, storage_index)
     if not player.gui.screen.qf_fabricator_frame then return end
-    local count = storage.fabricator_inventory[player.surface.index]["item"][item_name][quality_name]
+    if not storage_index then storage_index = player.surface.index end
+    local count = storage.fabricator_inventory[storage_index]["item"][item_name][quality_name]
     local table = storage.player_gui[player.index].gui.content_table
     table["label_container_" .. item_name .. "_" .. quality_name]["storage_tab_item_count_label_" .. item_name .. "_" .. quality_name].caption = "x" .. flib_format.number(count, true) .. "[quality="..quality_name.."] "
 end
