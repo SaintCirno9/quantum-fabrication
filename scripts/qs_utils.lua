@@ -5,6 +5,7 @@ local utils = require("scripts/utils")
 ---@field count int One of count or amount is required. Think about a way to change it
 ---@field type "item"|"fluid"
 ---@field quality? string Quality name
+---@field temperature? number
 ---@field surface_index uint Surface where this item/fluid is stored or processed
 
 ---@class StorageStatusTable
@@ -346,8 +347,12 @@ function qs_utils.pull_from_storage(qs_item, target_inventory)
         local current_fluid = target_inventory.get_fluid_contents()
         for name, amount in pairs(current_fluid) do
             if name == qs_item.name then
+                local fluid_insert_params = {name = qs_item.name, amount = to_be_provided}
+                if qs_item.temperature then
+                    fluid_insert_params.temperature = qs_item.temperature
+                end
                 ---@diagnostic disable-next-line: assign-type-mismatch
-                local inserted = target_inventory.insert_fluid{name = qs_item.name, amount = to_be_provided}
+                local inserted = target_inventory.insert_fluid(fluid_insert_params)
                 qs_item.count = inserted
                 qs_utils.remove_from_storage(qs_item)
                 if inserted < to_be_provided then
@@ -358,8 +363,12 @@ function qs_utils.pull_from_storage(qs_item, target_inventory)
                 qs_utils.add_to_storage({surface_index = qs_item.surface_index, name = name, count = target_inventory.remove_fluid{name = name, amount = amount}, type = "fluid", quality = QS_DEFAULT_QUALITY})
             end
         end
+        local fluid_insert_params = {name = qs_item.name, amount = to_be_provided}
+        if qs_item.temperature then
+            fluid_insert_params.temperature = qs_item.temperature
+        end
         ---@diagnostic disable-next-line: assign-type-mismatch
-        local inserted = target_inventory.insert_fluid{name = qs_item.name, amount = to_be_provided}
+        local inserted = target_inventory.insert_fluid(fluid_insert_params)
         qs_item.count = inserted
         qs_utils.remove_from_storage(qs_item)
         if inserted < to_be_provided then

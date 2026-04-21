@@ -115,6 +115,7 @@ end
 function instant_upgrade(entity, target, quality, player_index)
     
     local surface_index = entity.surface_index
+    local blueprint_settings = tracking.export_blueprint_settings(entity)
     local player
     local player_inventory
     if player_index then
@@ -173,6 +174,7 @@ function instant_upgrade(entity, target, quality, player_index)
     }
   
     if upgraded_entity then
+        tracking.apply_blueprint_settings(upgraded_entity, blueprint_settings)
         if recipe then
             qf_utils.fabricate_recipe(recipe, quality, surface_index, player_inventory)
             qs_utils.remove_from_storage(qs_item_target)

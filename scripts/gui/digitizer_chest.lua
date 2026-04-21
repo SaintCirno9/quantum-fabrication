@@ -20,6 +20,8 @@ function create_digitizer_chest_gui(player, entity)
     local entity_settings = entity_data.settings
     local text = tostring(entity_settings.intake_limit)
     if text == "0" then text = "" end
+    local reserve_text = tostring(entity_settings.reserve_limit or 0)
+    if reserve_text == "0" then reserve_text = "" end
 
     local main_content_frame = main_frame.add{
         type = "frame",
@@ -43,6 +45,22 @@ function create_digitizer_chest_gui(player, entity)
     }
     intake_limit_textfield.tags = {unit_number = entity.unit_number}
     intake_limit_textfield.style.width = 150
+
+    local reserve_limit_caption = main_content_frame.add{
+        type = "label",
+        name = "reserve_limit_caption",
+        caption = {"qf-general.has-tooltip", {"qf-entity.digitizer-chest-reserve"}},
+        tooltip = {"qf-entity.digitizer-chest-reserve-tooltip"},
+    }
+    local reserve_limit_textfield = main_content_frame.add{
+        type = "textfield",
+        name = "qf_reserve_limit_textfield",
+        text = reserve_text,
+        numeric = true,
+        lose_focus_on_confirm = true,
+    }
+    reserve_limit_textfield.tags = {unit_number = entity.unit_number}
+    reserve_limit_textfield.style.width = 150
     
     local decraft_button = main_content_frame.add{
         type = "button",

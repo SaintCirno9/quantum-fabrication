@@ -5,8 +5,34 @@ local utils = require("scripts/utils")
 ---@class PlatformPayload
 ---@field hub_inventory LuaInventory
 ---@field qs_items QSItem[]
+---@field platform_surface_index uint
 ---@field rocket_silo LuaEntity
+---@field rocket_parts_recipe LuaRecipe
+---@field rocket_parts_quality LuaQualityPrototype
 ---@field storage_index uint
+
+local function ensure_space_sendoff_state()
+    storage.space_sendoff_dirty_platforms = storage.space_sendoff_dirty_platforms or {}
+    if storage.space_sendoff_full_scan == nil then
+        storage.space_sendoff_full_scan = false
+    end
+end
+
+---@param delay_ticks uint
+---@param platform_surface_index? uint
+---@param full_scan? boolean
+function schedule_space_sendoff(delay_ticks, platform_surface_index, full_scan)
+    ensure_space_sendoff_state()
+    if full_scan then
+        storage.space_sendoff_full_scan = true
+    elseif platform_surface_index then
+        storage.space_sendoff_dirty_platforms[platform_surface_index] = true
+    end
+    local next_tick = game.tick + delay_ticks
+    if not storage.space_sendoff_next_tick or next_tick < storage.space_sendoff_next_tick then
+        storage.space_sendoff_next_tick = next_tick
+    end
+end
 
 ---Updates a table that links planets to their surface (so we'd have a shortcut)
 function update_planet_surface_link()
@@ -48,20 +74,82 @@ function incoming_items(requester)
     return items
 end
 
+---@param hub LuaEntity
+---@return string
+local function get_platform_request_summary(hub)
+    local requester_point = hub.get_requester_point()
+    if not requester_point then
+        return ""
+    end
+    local parts = {}
+    local index = 1
+    parts[index] = "enabled|" .. tostring(requester_point.enabled)
+    index = index + 1
+    for section_index, section in pairs(requester_point.sections or {}) do
+        parts[index] = "section|" .. section_index .. "|" .. tostring(section.active)
+        index = index + 1
+    end
+    table.sort(parts)
+    return table.concat(parts, ";")
+end
+
+local function refresh_platform_request_summary(platform_surface_index, platform_data)
+    local hub = platform_data.hub
+    if not hub then
+        local platform = platform_data.platform
+        if platform then
+            hub = platform.hub
+        end
+    end
+    if not hub or not hub.valid then
+        return
+    end
+    platform_data.hub = hub
+    local summary = get_platform_request_summary(hub)
+    if platform_data.request_summary ~= summary then
+        platform_data.request_summary = summary
+        schedule_space_sendoff(5, platform_surface_index, false)
+    end
+end
+
 function process_space_requests()
     local result = {}
+    local retry_platforms = {}
     utils.validate_surfaces()
     local platforms = storage.surface_data.platforms
     local planets = storage.surface_data.planets
-    for _, platform_data in pairs(platforms) do
+    ensure_space_sendoff_state()
+    if not storage.space_sendoff_full_scan and not next(storage.space_sendoff_dirty_platforms) then
+        return
+    end
+
+    local platforms_to_process = {}
+    if storage.space_sendoff_full_scan then
+        for platform_surface_index, platform_data in pairs(platforms) do
+            platforms_to_process[platform_surface_index] = platform_data
+        end
+    else
+        for platform_surface_index, _ in pairs(storage.space_sendoff_dirty_platforms) do
+            local platform_data = platforms[platform_surface_index]
+            if platform_data then
+                platforms_to_process[platform_surface_index] = platform_data
+            end
+        end
+    end
+    storage.space_sendoff_dirty_platforms = {}
+    storage.space_sendoff_full_scan = false
+
+    for platform_surface_index, platform_data in pairs(platforms_to_process) do
         local platform = platform_data.platform
         if not platform then goto continue end
         local storage_index = get_storage_index(platform.space_location)
         if storage_index then
             local hub = platform_data.hub
             if not hub then hub = platform.hub end
-            if hub then
+            if hub and hub.valid then
                 local hub_inventory = hub.get_inventory(defines.inventory.hub_main)
+                platform_data.hub = hub
+                platform_data.hub_inventory = hub_inventory
                 local requester_point = hub.get_requester_point()
                 local qs_items_result = {}
                 local index = 1
@@ -84,15 +172,32 @@ function process_space_requests()
                             index = index + 1
                         end
                     end
-                    local rocket_silo = planets[storage_index].rocket_silo
-                    if not rocket_silo or not rocket_silo.valid or not rocket_silo.get_recipe() then
-                        if not update_main_silo(storage_index) then goto continue end
+                    if index == 1 then goto continue end
+                    local rocket_silo = planets[storage_index] and planets[storage_index].rocket_silo
+                    local rocket_parts_recipe
+                    local rocket_parts_quality
+                    if rocket_silo and rocket_silo.valid then
+                        rocket_parts_recipe, rocket_parts_quality = rocket_silo.get_recipe()
+                    end
+                    if not rocket_silo or not rocket_silo.valid or not rocket_parts_recipe then
+                        if not update_main_silo(storage_index) then
+                            retry_platforms[platform_surface_index] = true
+                            goto continue
+                        end
                         rocket_silo = planets[storage_index].rocket_silo
+                        rocket_parts_recipe, rocket_parts_quality = rocket_silo.get_recipe()
+                    end
+                    if not rocket_parts_recipe or not rocket_parts_quality then
+                        retry_platforms[platform_surface_index] = true
+                        goto continue
                     end
                     result[#result + 1] = {
+                        platform_surface_index = platform_surface_index,
                         hub_inventory = hub_inventory,
                         qs_items = qs_items_result,
                         rocket_silo = rocket_silo,
+                        rocket_parts_recipe = rocket_parts_recipe,
+                        rocket_parts_quality = rocket_parts_quality,
                         storage_index = storage_index
                     }
                 end
@@ -101,8 +206,12 @@ function process_space_requests()
         ::continue::
     end
     ---If we failed to send everything, then we'll reset coundown to attempt later
-    if not send_to_space(result) then
-        storage.space_countdowns.space_sendoff = 60
+    local _, failed_platforms = send_to_space(result)
+    for platform_surface_index, _ in pairs(failed_platforms) do
+        retry_platforms[platform_surface_index] = true
+    end
+    for platform_surface_index, _ in pairs(retry_platforms) do
+        schedule_space_sendoff(60, platform_surface_index, false)
     end
 end
 
@@ -131,8 +240,10 @@ end
 ---Returns true if everything was sent and false if it wasn't
 ---@param platform_payloads PlatformPayload[]
 ---@return boolean
+---@return table<uint, boolean>
 function send_to_space(platform_payloads)
     local sent_everything = true
+    local failed_platforms = {}
 
     ---@param transfer_cost uint
     ---@param ingredients table
@@ -153,14 +264,16 @@ function send_to_space(platform_payloads)
     for _, payload in pairs(platform_payloads) do
         local hub_inventory = payload.hub_inventory
         local storage_index = payload.storage_index
+        local rocket_parts_recipe = payload.rocket_parts_recipe
+        local rocket_parts_quality = payload.rocket_parts_quality
         for _, qs_item in pairs(payload.qs_items) do
             -- How many items are needed and available
             local to_insert = qs_item.count
             local available = qs_utils.count_in_storage(qs_item)
             local insertable = hub_inventory.get_insertable_count({name = qs_item.name, quality = qs_item.quality})
-            local rocket_parts_recipe, rocket_parts_quality = payload.rocket_silo.get_recipe()
             if not rocket_parts_recipe then
                 sent_everything = false
+                failed_platforms[payload.platform_surface_index] = true
                 goto continue
             end
             ---@diagnostic disable-next-line: need-check-nil
@@ -169,6 +282,7 @@ function send_to_space(platform_payloads)
             local sendable = math.floor(available_parts / cost_per_item)
             if sendable == 0 or insertable == 0 then
                 sent_everything = false
+                failed_platforms[payload.platform_surface_index] = true
                 goto continue
             end
             -- Cannot send more items then can get inserted in the hub (common sense)
@@ -193,14 +307,17 @@ function send_to_space(platform_payloads)
                         qf_utils.fabricate_recipe(recipe, qs_item.quality, storage_index, nil, craftable)
                         to_insert = available + craftable
                         sent_everything = false
+                        failed_platforms[payload.platform_surface_index] = true
                         goto sending
                     end
                 end
                 to_insert = available
                 sent_everything = false
+                failed_platforms[payload.platform_surface_index] = true
             end
             if to_insert == 0 then
                 sent_everything = false
+                failed_platforms[payload.platform_surface_index] = true
                 goto continue
             end
             ::sending::
@@ -213,7 +330,7 @@ function send_to_space(platform_payloads)
             ::continue::
         end
     end
-    return sent_everything
+    return sent_everything, failed_platforms
 end
 
 ---Returns how many rocket parts are needed to transfer a single item
@@ -228,29 +345,42 @@ function get_space_transfer_cost(qs_item, rocket_silo)
     return rocket_parts_per_launch / (rocket_weight_limit / weight) / productivity
 end
 
-if settings.startup["qf-enable-space-transfer"].value then
-    ---Special space-specific countdown handling.
-    script.on_nth_tick(17, function(event)
+function get_space_platform_nth_ticks()
+    if not settings.startup["qf-enable-space-transfer"].value then
+        return {}
+    end
+    return {17, 600}
+end
+
+function on_space_platform_nth_tick(event)
+    if not settings.startup["qf-enable-space-transfer"].value then
+        return
+    end
+    if event.nth_tick == 17 then
         if not storage.qf_enabled then return end
-        for type, countdown in pairs(storage.space_countdowns) do
-            if countdown then
-                storage.space_countdowns[type] = storage.space_countdowns[type] - 1
-                if countdown == 0 then
-                    storage.space_countdowns[type] = nil
-                    if type == "space_sendoff" then
-                        process_space_requests()
-                    end
-                end
-            end
+        if storage.space_sendoff_next_tick and game.tick >= storage.space_sendoff_next_tick then
+            storage.space_sendoff_next_tick = nil
+            process_space_requests()
         end
-    end)
+        return
+    end
+    if event.nth_tick == 600 then
+        if not storage.qf_enabled then return end
+        for platform_surface_index, platform_data in pairs(storage.surface_data.platforms) do
+            refresh_platform_request_summary(platform_surface_index, platform_data)
+        end
+    end
 end
 
 function on_entity_logistic_slot_changed(event)
     if not storage.qf_enabled then return end
     local entity = event.entity
     if entity.valid and entity.type == "space-platform-hub" then
-        storage.space_countdowns.space_sendoff = 5
+        local platform_data = storage.surface_data.platforms[entity.surface_index]
+        if platform_data then
+            platform_data.request_summary = get_platform_request_summary(entity)
+        end
+        schedule_space_sendoff(5, entity.surface_index, false)
     end
 end
 
@@ -259,7 +389,16 @@ function on_space_platform_changed_state(event)
     local old_state = event.old_state
     local state = event.platform.state
     if old_state == defines.space_platform_state.on_the_path and state == defines.space_platform_state.waiting_at_station then
-        storage.space_countdowns.space_sendoff = 5
+        local hub = event.platform.hub
+        if hub and hub.valid then
+            local platform_data = storage.surface_data.platforms[hub.surface_index]
+            if platform_data then
+                platform_data.request_summary = get_platform_request_summary(hub)
+            end
+            schedule_space_sendoff(5, hub.surface_index, false)
+        else
+            schedule_space_sendoff(5, nil, true)
+        end
     end
 end
 

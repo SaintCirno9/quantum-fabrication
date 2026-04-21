@@ -40,6 +40,8 @@ function on_gui_text_changed(event)
         event.element.focus()
     elseif event.element.name == "qf_intake_limit_textfield" then
         gui_utils.set_intake_limit(event.element.text, event.element.tags.unit_number)
+    elseif event.element.name == "qf_reserve_limit_textfield" then
+        gui_utils.set_reserve_limit(event.element.text, event.element.tags.unit_number)
     end
 end
 
@@ -132,6 +134,7 @@ function on_gui_click(event)
         game.print("Tracking repair finished")
     elseif element.name == "qf_intake_limit_button" then
         storage.options.default_intake_limit = storage.tracked_entities["digitizer-chest"][element_tags.unit_number].settings.intake_limit
+        storage.options.default_reserve_limit = storage.tracked_entities["digitizer-chest"][element_tags.unit_number].settings.reserve_limit or 0
         storage.options.default_decraft = storage.tracked_entities["digitizer-chest"][element_tags.unit_number].settings.decraft
         if storage.tracked_entities["digitizer-chest"][element_tags.unit_number].entity.name == "digitizer-chest" then
             storage.options.default_digitizer_chest_fluid_enabled = storage.tracked_entities["digitizer-chest"][element_tags.unit_number].settings.fluid_enabled == true

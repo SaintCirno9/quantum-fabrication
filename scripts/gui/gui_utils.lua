@@ -233,4 +233,15 @@ function gui_utils.set_intake_limit(text, unit_number)
     entity_data.settings.intake_limit = number
 end
 
+---@param text string
+---@param unit_number uint
+function gui_utils.set_reserve_limit(text, unit_number)
+    local entity_data = storage.tracked_entities["digitizer-chest"][unit_number]
+    if not entity_data then return end
+    local number = tonumber(text)
+    if not number then number = 0 end
+    -- 保留负值输入，当前玩法会利用它在无信号入仓路径里放大入仓量
+    entity_data.settings.reserve_limit = number
+end
+
 return gui_utils

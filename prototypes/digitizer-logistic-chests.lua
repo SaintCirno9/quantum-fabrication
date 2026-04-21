@@ -1,18 +1,33 @@
+local function create_digitizer_logistic_icons(base_icon)
+    return {
+        {
+            icon = base_icon,
+            icon_size = 64,
+            icon_mipmaps = 4,
+        },
+        {
+            icon = "__quantum-fabricator__/graphics/icons/digitizer-chest.png",
+            icon_size = 64,
+            icon_mipmaps = 4,
+            scale = 0.5,
+            shift = {8, 8},
+        },
+    }
+end
+
 local function create_digitizer_logistic_chest(base_name, new_name, icon, order)
     local entity = table.deepcopy(data.raw["logistic-container"][base_name])
     entity.name = new_name
-    entity.icon = icon
-    entity.icon_size = 64
-    entity.icon_mipmaps = 4
+    entity.icon = nil
+    entity.icons = create_digitizer_logistic_icons(icon)
     entity.minable = {mining_time = 0.2, result = new_name}
     entity.inventory_size = 48
 
     local item = {
         type = "item",
         name = new_name,
-        icon = icon,
-        icon_size = 64,
-        icon_mipmaps = 4,
+        icon = nil,
+        icons = create_digitizer_logistic_icons(icon),
         subgroup = "logistic-network",
         order = order,
         place_result = new_name,

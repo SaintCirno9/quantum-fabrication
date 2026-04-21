@@ -21,6 +21,48 @@ local function tables_equal(first, second)
     return true
 end
 
+local function get_cloneable_settings_cache_key(entity)
+    local position = entity.position
+    return entity.surface_index .. "|" .. position.x .. "|" .. position.y
+end
+
+local function cleanup_recent_cloneable_settings()
+    local recent_cloneable_settings = storage.recent_cloneable_settings
+    if not recent_cloneable_settings then return end
+    for key, cached in pairs(recent_cloneable_settings) do
+        if not cached or cached.expire_tick < game.tick then
+            recent_cloneable_settings[key] = nil
+        end
+    end
+end
+
+local function store_recent_cloneable_settings(entity)
+    if not entity or not entity.valid or not Cloneable_entities[entity.name] then return end
+    local settings = tracking.export_blueprint_settings(entity)
+    if not settings then return end
+    storage.recent_cloneable_settings = storage.recent_cloneable_settings or {}
+    cleanup_recent_cloneable_settings()
+    storage.recent_cloneable_settings[get_cloneable_settings_cache_key(entity)] = {
+        expire_tick = game.tick + 2,
+        settings = settings,
+    }
+end
+
+local function apply_recent_cloneable_settings(entity)
+    if not entity or not entity.valid or not Cloneable_entities[entity.name] then return end
+    local recent_cloneable_settings = storage.recent_cloneable_settings
+    if not recent_cloneable_settings then return end
+    cleanup_recent_cloneable_settings()
+    local key = get_cloneable_settings_cache_key(entity)
+    local cached = recent_cloneable_settings[key]
+    if not cached then return end
+    recent_cloneable_settings[key] = nil
+    if cached.expire_tick < game.tick then
+        return
+    end
+    tracking.apply_blueprint_settings(entity, cached.settings)
+end
+
 local function bar_changed(source, destination)
     if source.type ~= "container" and source.type ~= "logistic-container" then return false end
 
@@ -103,6 +145,7 @@ function on_init()
     storage.options = {
         auto_recheck_item_request_proxies = true,
         default_intake_limit = 0,
+        default_reserve_limit = 0,
         default_decraft = true,
         default_digitizer_chest_fluid_enabled = false,
     }
@@ -128,6 +171,9 @@ function on_init()
     storage.space_countdowns = {
         space_sendoff = nil,
     }
+    storage.space_sendoff_dirty_platforms = {}
+    storage.space_sendoff_full_scan = false
+    storage.space_sendoff_next_tick = nil
     --Because cliffs do not have unit number
     storage.cliff_ids = 0
     storage.request_ids = {
@@ -169,6 +215,7 @@ function on_init()
         platforms = {},
         planets = {},
     }
+    storage.recent_cloneable_settings = {}
     ---@type table <string, QSPrototypeData>
     storage.prototypes_data = {}
     storage.craft_data = {}
@@ -225,6 +272,28 @@ local Digitizer_queue_display_names = {
     long_idle = "深度空闲",
 }
 
+local function get_digitizer_hover_text(entity_data)
+    local queue_name = entity_data.queue_name or "active"
+    local full_pass_seconds = tracking.get_digitizer_queue_full_pass_seconds(queue_name)
+    local queue_text = "队列: " .. (Digitizer_queue_display_names[queue_name] or queue_name) .. " " .. string.format("%.2fS", full_pass_seconds)
+    local container_fluid = entity_data.container_fluid
+    if not container_fluid or not container_fluid.valid then
+        return queue_text
+    end
+
+    local fluid_lines = {}
+    local index = 1
+    for fluid_name, amount in pairs(container_fluid.get_fluid_contents()) do
+        fluid_lines[index] = fluid_name .. " : " .. string.format("%.1f", amount)
+        index = index + 1
+    end
+    if index == 1 then
+        return queue_text
+    end
+    table.sort(fluid_lines)
+    return queue_text .. " | " .. table.concat(fluid_lines, " | ")
+end
+
 local function destroy_digitizer_hover_text(player_index)
     local player_data = storage.player_gui[player_index]
     if not player_data then return end
@@ -261,9 +330,7 @@ local function update_digitizer_hover_text(player_index)
         return
     end
 
-    local queue_name = entity_data.queue_name or "active"
-    local full_pass_seconds = tracking.get_digitizer_queue_full_pass_seconds(queue_name)
-    local queue_text = "队列: " .. (Digitizer_queue_display_names[queue_name] or queue_name) .. " " .. string.format("%.2fS", full_pass_seconds)
+    local queue_text = get_digitizer_hover_text(entity_data)
     local render_object = player_data.digitizer_hover_render_id and rendering.get_object_by_id(player_data.digitizer_hover_render_id)
 
     if not render_object or player_data.digitizer_hover_unit_number ~= selected.unit_number then
@@ -310,6 +377,14 @@ end
 function on_config_changed()
     local disable_legacy_digitizer_chest_fluid_interfaces = storage.options == nil or storage.options.default_digitizer_chest_fluid_enabled == nil
     storage.options = storage.options or {}
+    storage.recent_cloneable_settings = storage.recent_cloneable_settings or {}
+    storage.space_sendoff_dirty_platforms = storage.space_sendoff_dirty_platforms or {}
+    if storage.space_sendoff_full_scan == nil then
+        storage.space_sendoff_full_scan = false
+    end
+    if storage.options.default_reserve_limit == nil then
+        storage.options.default_reserve_limit = 0
+    end
     if storage.options.default_digitizer_chest_fluid_enabled == nil then
         storage.options.default_digitizer_chest_fluid_enabled = false
     end
@@ -412,6 +487,9 @@ function on_surface_deleted(event)
     storage.fabricator_inventory[surface_index] = nil
     storage.surface_data.platforms[surface_index] = nil
     storage.surface_data.planets[surface_index] = nil
+    if storage.space_sendoff_dirty_platforms then
+        storage.space_sendoff_dirty_platforms[surface_index] = nil
+    end
 end
 
 ---comment
@@ -458,7 +536,7 @@ function on_built_entity(event)
                 entity = entity,
                 player_index = player_index
             })
-            storage.space_countdowns.space_sendoff = 2
+            schedule_space_sendoff(2, nil, true)
         elseif entity.type == "tile-ghost" then
             storage.countdowns.tile_creation = 10
             storage.request_player_ids.tiles = player_index
@@ -466,8 +544,28 @@ function on_built_entity(event)
         end
         if Trackable_entities[entity.name] then
             tracking.create_tracked_request({request_type = "entities", entity = entity, player_index = event.player_index})
+            if event.tags and event.tags.qf_entity_settings then
+                tracking.apply_blueprint_settings(entity, event.tags.qf_entity_settings)
+            else
+                apply_recent_cloneable_settings(entity)
+            end
         end
         ::continue::
+    end
+end
+
+function on_player_setup_blueprint(event)
+    local mapping = event.mapping and event.mapping.get()
+    local blueprint = event.stack
+    if not mapping or not blueprint or not blueprint.valid_for_read then return end
+
+    for entity_number, entity in pairs(mapping) do
+        if entity and entity.valid and Trackable_entities[entity.name] then
+            local blueprint_settings = tracking.export_blueprint_settings(entity)
+            if blueprint_settings then
+                blueprint.set_blueprint_entity_tag(entity_number, "qf_entity_settings", blueprint_settings)
+            end
+        end
     end
 end
 
@@ -507,7 +605,7 @@ function on_marked_for_deconstruction(event)
                         entity = entity,
                         player_index = player_index
                     })
-                    storage.space_countdowns.space_sendoff = 2
+                    schedule_space_sendoff(2, nil, true)
                 end
             elseif entity.type == "deconstructible-tile-proxy" then
                 storage.countdowns.tile_removal = 10
@@ -529,6 +627,7 @@ end
 function on_destroyed(event)
     local entity = event.entity
     if entity and entity.valid then
+        store_recent_cloneable_settings(entity)
         if Trackable_entities[entity.name] then
             local entity_data = tracking.get_entity_data(entity)
             tracking.remove_tracked_entity(entity_data)
@@ -548,7 +647,7 @@ function on_upgrade(event)
             entity = entity,
             player_index = player_index
         })
-        storage.space_countdowns.space_sendoff = 2
+        schedule_space_sendoff(2, nil, true)
     end
 end
 
@@ -668,16 +767,62 @@ end
 function on_research_changed(event)
     Research_finished = true
 end
-script.on_nth_tick(338, function(event)
-    if Research_finished then
-        post_research_recheck()
-        Research_finished = false
-    end
-end)
 
-script.on_nth_tick(29, function(event)
-    refresh_digitizer_hover_texts()
-end)
+local function get_registered_nth_ticks()
+    local nth_tick_map = {
+        [11] = true,
+        [29] = true,
+        [338] = true,
+    }
+    for _, nth_tick in pairs(tracking.get_registered_nth_ticks()) do
+        nth_tick_map[nth_tick] = true
+    end
+    for _, nth_tick in pairs(get_space_platform_nth_ticks()) do
+        nth_tick_map[nth_tick] = true
+    end
+    local result = {}
+    for nth_tick, _ in pairs(nth_tick_map) do
+        table.insert(result, nth_tick)
+    end
+    return result
+end
+
+local function on_registered_nth_tick(event)
+    if event.nth_tick == 338 then
+        if Research_finished then
+            post_research_recheck()
+            Research_finished = false
+        end
+    end
+    if event.nth_tick == 29 then
+        refresh_digitizer_hover_texts()
+    end
+    if event.nth_tick == 11 then
+        if storage.qf_enabled then
+            for type, countdown in pairs(storage.countdowns) do
+                if countdown then
+                    storage.countdowns[type] = storage.countdowns[type] - 1
+                    if countdown == 0 then
+                        storage.countdowns[type] = nil
+                        if type == "tile_creation" then
+                            instant_tileation()
+                            schedule_space_sendoff(2, nil, true)
+                        elseif type == "temp_statistics" then
+                            qs_utils.add_production_statistics()
+                        elseif type == "in_combat" then
+                            register_request_table("revivals")
+                        elseif type == "tile_removal" then
+                            instant_detileation()
+                        end
+                    end
+                end
+            end
+        end
+    end
+    tracking.on_fixed_nth_tick(event)
+    tracking.on_tracked_entity_nth_tick(event)
+    on_space_platform_nth_tick(event)
+end
 
 function repair_tracking()
     utils.validate_surfaces()
@@ -707,7 +852,7 @@ function repair_tracking()
         end
     end
 
-    storage.space_countdowns.space_sendoff = 2
+    schedule_space_sendoff(2, nil, true)
 end
 
 function on_console_command(command)
@@ -774,29 +919,7 @@ commands.add_command("qf_hesoyam_harder", nil, on_console_command)
 commands.add_command("qf_debug_command", nil, on_console_command)
 commands.add_command("qf_reprocess_recipes", nil, on_console_command)
 commands.add_command("qf_dump_digitizer_queues", nil, on_console_command)
-
-script.on_nth_tick(11, function(event)
-    if storage.qf_enabled then
-        for type, countdown in pairs(storage.countdowns) do
-            if countdown then
-                storage.countdowns[type] = storage.countdowns[type] - 1
-                if countdown == 0 then
-                    storage.countdowns[type] = nil
-                    if type == "tile_creation" then
-                        instant_tileation()
-                        storage.space_countdowns.space_sendoff = 2
-                    elseif type == "temp_statistics" then
-                        qs_utils.add_production_statistics()
-                    elseif type == "in_combat" then
-                        register_request_table("revivals")
-                    elseif type == "tile_removal" then
-                        instant_detileation()
-                    end
-                end
-            end
-        end
-    end
-end)
+script.on_nth_tick(get_registered_nth_ticks(), on_registered_nth_tick)
 
 script.on_event(defines.events.on_runtime_mod_setting_changed, on_mod_settings_changed)
 script.on_init(on_init)
@@ -822,6 +945,7 @@ script.on_event(defines.events.on_built_entity, on_built_entity)
 script.on_event(defines.events.on_robot_built_entity, on_built_entity)
 script.on_event(defines.events.script_raised_built, on_built_entity)
 script.on_event(defines.events.script_raised_revive, on_built_entity)
+script.on_event(defines.events.on_player_setup_blueprint, on_player_setup_blueprint)
 
 script.on_event(defines.events.on_marked_for_upgrade, on_upgrade)
 script.on_event(defines.events.on_cancelled_upgrade, on_cancelled_upgrade)

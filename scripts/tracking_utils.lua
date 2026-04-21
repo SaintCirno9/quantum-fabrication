@@ -9,13 +9,49 @@ local utils = require("scripts/utils")
 local tracking = {}
 local digitizer_chest_signal_recheck_ticks = 30
 local digitizer_chest_signal_recheck_max_ticks = 240
+
+local function is_prime_tick(value)
+    if value < 2 then
+        return false
+    end
+    if value == 2 then
+        return true
+    end
+    if value % 2 == 0 then
+        return false
+    end
+    local divisor = 3
+    while divisor * divisor <= value do
+        if value % divisor == 0 then
+            return false
+        end
+        divisor = divisor + 2
+    end
+    return true
+end
+
+local function get_next_prime_tick(value)
+    local candidate = math.max(value, 2)
+    if candidate == 2 then
+        return candidate
+    end
+    if candidate % 2 == 0 then
+        candidate = candidate + 1
+    end
+    while not is_prime_tick(candidate) do
+        candidate = candidate + 2
+    end
+    return candidate
+end
+
 local digitizer_chest_signal_nth_tick = settings.startup["qf-digitizer-signal-nth-tick"].value
 local digitizer_chest_active_nth_tick = settings.startup["qf-digitizer-active-nth-tick"].value
 local digitizer_chest_idle_nth_tick = settings.startup["qf-digitizer-idle-nth-tick"].value
-local digitizer_chest_long_idle_nth_tick = math.max(digitizer_chest_idle_nth_tick * 5, 60)
+local digitizer_chest_long_idle_nth_tick = get_next_prime_tick(math.max(digitizer_chest_idle_nth_tick * 5, 60))
 local digitizer_chest_idle_to_long_idle_checks = 3
 local digitizer_chest_active_keepalive_ticks = math.max(digitizer_chest_active_nth_tick * 4, 60)
-local digitizer_queue_full_pass_seconds_cache_version = 1
+local digitizer_queue_dynamic_batch_divisor = 6
+local digitizer_queue_full_pass_seconds_cache_version = 3
 
 local Digitizer_chest_entities = {
     ["digitizer-chest"] = true,
@@ -66,6 +102,8 @@ end
 ---@field idle_empty_checks? uint
 ---@field active_until_tick? uint
 ---@field inventory_processing? table
+---@field has_unmet_signal_requests? boolean
+---@field parsed_signal_requests? table
 
 ---@class EntitySettings
 ---@field intake_limit? uint
@@ -324,7 +362,7 @@ function tracking.dump_digitizer_chest_queues(max_entries, player_index)
         local runtime = queue_runtime[queue_name]
         local dynamic_batch_size = runtime.base_batch_size
         if #entries > runtime.base_batch_size then
-            dynamic_batch_size = math.ceil(#entries / 20)
+            dynamic_batch_size = math.ceil(#entries / digitizer_queue_dynamic_batch_divisor)
             if dynamic_batch_size < runtime.base_batch_size then
                 dynamic_batch_size = runtime.base_batch_size
             end
@@ -455,6 +493,9 @@ local function refresh_digitizer_chest_signals(entity_data)
     if entity_data.signal_active == nil then
         entity_data.signal_active = true
     end
+    if entity_data.signals_changed == nil then
+        entity_data.signals_changed = false
+    end
     if entity_data.next_signal_check_tick == nil then
         entity_data.next_signal_check_tick = 0
     end
@@ -462,19 +503,25 @@ local function refresh_digitizer_chest_signals(entity_data)
         entity_data.signal_check_interval_ticks = digitizer_chest_signal_recheck_ticks
     end
 
+    local checked_now = false
     if game.tick >= entity_data.next_signal_check_tick then
+        checked_now = true
         local new_signals = entity_data.entity.get_signals(defines.wire_connector_id.circuit_red, defines.wire_connector_id.circuit_green)
         entity_data.signal_active = new_signals ~= nil and next(new_signals) ~= nil
-        if signals_equal_ordered(entity_data.cached_signals, new_signals) then
+        local changed = not signals_equal_ordered(entity_data.cached_signals, new_signals)
+        entity_data.signals_changed = changed
+        if not changed then
             entity_data.signal_check_interval_ticks = math.min(digitizer_chest_signal_recheck_max_ticks, entity_data.signal_check_interval_ticks * 2)
         else
             entity_data.signal_check_interval_ticks = digitizer_chest_signal_recheck_ticks
         end
         entity_data.cached_signals = new_signals
         entity_data.next_signal_check_tick = game.tick + entity_data.signal_check_interval_ticks
+    else
+        entity_data.signals_changed = false
     end
 
-    return entity_data.cached_signals
+    return entity_data.cached_signals, checked_now
 end
 
 local function get_digitizer_inventory_processing(entity_data)
@@ -487,6 +534,7 @@ local function get_digitizer_inventory_processing(entity_data)
         fluids = {
             name = "",
             count = 0,
+            temperature = nil,
         },
         preprocessed_items = {},
     }
@@ -514,6 +562,7 @@ local function get_digitizer_update_temp_data(entity_data, storage_index)
             count = 0,
             type = "fluid",
             quality = QS_DEFAULT_QUALITY,
+            temperature = nil,
             surface_index = storage_index
         },
         item_remove_params = {
@@ -531,6 +580,9 @@ local function get_digitizer_update_temp_data(entity_data, storage_index)
 end
 
 local function digitizer_chest_reads_contents(entity)
+    if entity.name == "digitizer-passive-provider-chest" or entity.name == "digitizer-requester-chest" then
+        return true
+    end
     if entity.name ~= "digitizer-chest" then
         return false
     end
@@ -553,6 +605,34 @@ local function reset_digitizer_inventory_processing(inventory_processing)
     end
     inventory_processing.fluids.name = ""
     inventory_processing.fluids.count = 0
+    inventory_processing.fluids.temperature = nil
+end
+
+local function fluid_temperatures_match(current_temperature, requested_temperature)
+    if requested_temperature == nil then
+        return true
+    end
+    if current_temperature == nil then
+        return false
+    end
+    return math.abs(current_temperature - requested_temperature) < 0.001
+end
+
+local function get_container_fluid_state(container_fluid)
+    if not container_fluid or not container_fluid.valid then
+        return nil
+    end
+    local fluidbox = container_fluid.fluidbox
+    if not fluidbox then
+        return nil
+    end
+    for index = 1, #fluidbox do
+        local fluid = fluidbox[index]
+        if fluid and fluid.amount and fluid.amount > 0 then
+            return fluid
+        end
+    end
+    return nil
 end
 
 local function add_digitizer_requested_item(items, item_name, quality_name, count)
@@ -562,6 +642,109 @@ local function add_digitizer_requested_item(items, item_name, quality_name, coun
         items[item_name] = item_by_quality
     end
     item_by_quality[quality_name] = (item_by_quality[quality_name] or 0) + count
+end
+
+local function get_digitizer_signal_request_parse(entity_data, signals, signal_fetchable)
+    if not signals then
+        return nil
+    end
+
+    local cached = entity_data.parsed_signal_requests
+    if cached and cached.signals == signals and cached.signal_fetchable == signal_fetchable then
+        return cached
+    end
+
+    local parsed = {
+        signals = signals,
+        signal_fetchable = signal_fetchable,
+        storage_index = entity_data.surface_index,
+        fixed_quantity = 0,
+        limit_value = nil,
+        decraft = nil,
+        items = {},
+        fluids = {
+            name = "",
+            count = 0,
+            temperature = nil,
+        },
+    }
+    local preprocessed_items = {}
+    local quality = QS_DEFAULT_QUALITY
+
+    for _, signal in pairs(signals) do
+        if signal.count > 0 then
+            if signal.signal.type == "virtual" then
+                if signal.signal.name == "signal-S" then
+                    parsed.storage_index = signal.count
+                elseif signal.signal.name == "signal-L" then
+                    parsed.limit_value = signal.count
+                elseif signal.signal.name == "signal-D" then
+                    parsed.decraft = true
+                elseif signal.signal.name == "signal-F" then
+                    parsed.fixed_quantity = signal.count
+                elseif signal.signal.name == "signal-T" then
+                    parsed.fluids.temperature = signal.count
+                end
+            elseif signal.signal.type == "quality" then
+                quality = signal.signal.name
+            elseif signal_fetchable and (signal.signal.type == nil or signal.signal.type == "item") then
+                local item_quality = signal.signal.quality
+                if item_quality then
+                    add_digitizer_requested_item(parsed.items, signal.signal.name, item_quality, signal.count)
+                else
+                    preprocessed_items[signal.signal.name] = (preprocessed_items[signal.signal.name] or 0) + signal.count
+                end
+            elseif signal_fetchable and signal.signal.type == "fluid" then
+                if signal.count > parsed.fluids.count then
+                    parsed.fluids.name = signal.signal.name
+                    parsed.fluids.count = signal.count
+                end
+            end
+        end
+    end
+
+    for item_name, item_count in pairs(preprocessed_items) do
+        add_digitizer_requested_item(parsed.items, item_name, quality, item_count)
+    end
+
+    if parsed.fixed_quantity > 0 then
+        for _, item_by_quality in pairs(parsed.items) do
+            for item_quality, _ in pairs(item_by_quality) do
+                item_by_quality[item_quality] = parsed.fixed_quantity
+            end
+        end
+        if parsed.fluids.count > 0 then
+            parsed.fluids.count = parsed.fixed_quantity
+        end
+    end
+
+    entity_data.parsed_signal_requests = parsed
+    return parsed
+end
+
+local function load_digitizer_signal_request_processing(entity_data, parsed)
+    local inventory_processing = get_digitizer_inventory_processing(entity_data)
+    reset_digitizer_inventory_processing(inventory_processing)
+
+    if not parsed then
+        return inventory_processing
+    end
+
+    for item_name, item_by_quality in pairs(parsed.items) do
+        local processing_item_by_quality = inventory_processing.items[item_name]
+        if not processing_item_by_quality then
+            processing_item_by_quality = {}
+            inventory_processing.items[item_name] = processing_item_by_quality
+        end
+        for item_quality, item_count in pairs(item_by_quality) do
+            processing_item_by_quality[item_quality] = item_count
+        end
+    end
+
+    inventory_processing.fluids.name = parsed.fluids.name
+    inventory_processing.fluids.count = parsed.fluids.count
+    inventory_processing.fluids.temperature = parsed.fluids.temperature
+    return inventory_processing
 end
 
 local ensure_digitizer_chest_queue_storage
@@ -593,6 +776,36 @@ local function fabricate_digitizer_requested_item(qs_item, target_inventory)
 
     qf_utils.fabricate_recipe(recipe, qs_item.quality, qs_item.surface_index, nil, multiplier, false, craftable_count)
     qs_utils.pull_from_storage(qs_item, target_inventory)
+end
+
+local function digitizer_intake_limit_remaining_capacity(item_name, quality_name, storage_index, storage_items, limit_value, decraft)
+    local stored_count = storage_items[item_name][quality_name]
+    local remaining_capacity = limit_value - stored_count
+    if remaining_capacity <= 0 then
+        return 0
+    end
+    if not decraft or not utils.is_placeable(item_name) or not storage.product_craft_data[item_name] then
+        return remaining_capacity
+    end
+
+    local qs_item = {
+        name = item_name,
+        count = 1,
+        type = "item",
+        quality = quality_name,
+        surface_index = storage_index
+    }
+    local recipe, craftable_count = qf_utils.get_craftable_recipe(qs_item, nil, false, true)
+    if not recipe or not craftable_count or craftable_count <= 0 then
+        return remaining_capacity
+    end
+
+    local product_amount = get_digitizer_recipe_product_amount(recipe, item_name)
+    remaining_capacity = remaining_capacity - craftable_count * product_amount
+    if remaining_capacity <= 0 then
+        return 0
+    end
+    return remaining_capacity
 end
 
 local function get_digitizer_queue_size_key(queue_name)
@@ -628,7 +841,7 @@ local function update_digitizer_queue_full_pass_seconds(queues, queue_name)
 
     local dynamic_batch_size = base_batch_size
     if queue_size > base_batch_size then
-        dynamic_batch_size = math.ceil(queue_size / 20)
+        dynamic_batch_size = math.ceil(queue_size / digitizer_queue_dynamic_batch_divisor)
         if dynamic_batch_size < base_batch_size then
             dynamic_batch_size = base_batch_size
         end
@@ -786,8 +999,10 @@ local function set_digitizer_chest_queue(entity_data, queue_name)
         return
     end
 
-    if entity_data.queue_name and queues[entity_data.queue_name] then
-        remove_digitizer_queue_entry(queues, entity_data.queue_name, unit_number)
+    local previous_queue = entity_data.queue_name
+
+    if previous_queue and queues[previous_queue] then
+        remove_digitizer_queue_entry(queues, previous_queue, unit_number)
     else
         remove_digitizer_queue_entry_from_all(queues, unit_number)
     end
@@ -801,7 +1016,7 @@ local function get_dynamic_digitizer_queue_batch(queues, queue_name, base_batch_
     if queue_size <= base_batch_size then
         return base_batch_size
     end
-    local dynamic_batch_size = math.ceil(queue_size / 20)
+    local dynamic_batch_size = math.ceil(queue_size / digitizer_queue_dynamic_batch_divisor)
     if dynamic_batch_size < base_batch_size then
         dynamic_batch_size = base_batch_size
     end
@@ -816,7 +1031,8 @@ local function process_digitizer_chest_queue(queue_name, iterations, batch_size)
     local queues = ensure_digitizer_chest_queue_storage()
     local queue = queues[queue_name]
     local request_id_key = "digitizer-chest-" .. queue_name
-    if get_digitizer_queue_size(queues, queue_name) <= 0 then
+    local queue_size = get_digitizer_queue_size(queues, queue_name)
+    if queue_size <= 0 then
         storage.request_ids[request_id_key] = nil
         return
     end
@@ -879,7 +1095,7 @@ local function digitizer_chest_has_processable_contents(entity_data)
 
     if entity_data.inventory and not entity_data.inventory.is_empty() then
         for _, item in pairs(entity_data.inventory.get_contents()) do
-            if storage_items[item.name][item.quality] < limit_value then
+            if digitizer_intake_limit_remaining_capacity(item.name, item.quality, entity_data.surface_index, storage_items, limit_value, entity_data.settings.decraft) > 0 then
                 return true
             end
         end
@@ -893,6 +1109,91 @@ local function digitizer_chest_has_processable_contents(entity_data)
                     return true
                 end
             end
+        end
+    end
+
+    return false
+end
+
+local function digitizer_chest_has_unmet_signal_requests(entity_data, signals)
+    if not entity_data.signal_active then
+        return false
+    end
+
+    local entity = entity_data.entity
+    local fetchable = settings.global["qf-super-digitizing-chests"].value
+    local requester_buffered = entity.name == "digitizer-requester-chest"
+    local signal_fetchable = fetchable or requester_buffered
+    if not signal_fetchable then
+        return false
+    end
+
+    local parsed = get_digitizer_signal_request_parse(entity_data, signals, signal_fetchable)
+    if not parsed then
+        return false
+    end
+
+    local storage_index = parsed.storage_index
+    local fixed_quantity = parsed.fixed_quantity
+    local inventory_processing = load_digitizer_signal_request_processing(entity_data, parsed)
+    local processing_items = inventory_processing.items
+    local processing_fluids = inventory_processing.fluids
+
+    local read_contents = digitizer_chest_reads_contents(entity)
+    local inventory_contents = entity_data.inventory and entity_data.inventory.get_contents() or nil
+    local inventory_counts = nil
+    if inventory_contents then
+        inventory_counts = {}
+        for _, item in pairs(inventory_contents) do
+            local item_by_quality = inventory_counts[item.name]
+            if not item_by_quality then
+                item_by_quality = {}
+                inventory_counts[item.name] = item_by_quality
+            end
+            item_by_quality[item.quality] = item.count
+            if read_contents and fixed_quantity == 0 then
+                local processing_item_by_quality = processing_items[item.name]
+                if processing_item_by_quality and processing_item_by_quality[item.quality] then
+                    processing_item_by_quality[item.quality] = processing_item_by_quality[item.quality] - item.count
+                end
+            end
+        end
+    end
+
+    for item_name, item_by_quality in pairs(processing_items) do
+        local current_item_by_quality = inventory_counts and inventory_counts[item_name]
+        for item_quality, item_count in pairs(item_by_quality) do
+            local current_count = current_item_by_quality and current_item_by_quality[item_quality] or 0
+            if current_count < item_count then
+                return true
+            end
+        end
+    end
+
+    local current_fluid = get_container_fluid_state(entity_data.container_fluid)
+    if processing_fluids.count > 0 and entity_data.container_fluid and entity_data.container_fluid.valid then
+        local current_fluid_amount = 0
+        if current_fluid
+            and current_fluid.name == processing_fluids.name
+            and fluid_temperatures_match(current_fluid.temperature, processing_fluids.temperature)
+        then
+            current_fluid_amount = current_fluid.amount
+        end
+        if read_contents and fixed_quantity == 0 and processing_fluids.name ~= "" then
+            processing_fluids.count = processing_fluids.count - current_fluid_amount
+        end
+    end
+
+    if processing_fluids.count > 0 and entity_data.container_fluid and entity_data.container_fluid.valid then
+        local current_fluid_amount = 0
+        if current_fluid
+            and current_fluid.name == processing_fluids.name
+            and fluid_temperatures_match(current_fluid.temperature, processing_fluids.temperature)
+        then
+            current_fluid_amount = current_fluid.amount
+        end
+        if current_fluid_amount < processing_fluids.count then
+            return true
         end
     end
 
@@ -931,12 +1232,20 @@ local function wake_digitizer_chest_idle_queue(iterations, batch_size)
                 local entity = entity_data.entity
                 if not entity or not entity.valid then
                     tracking.remove_tracked_entity(entity_data)
-                elseif digitizer_chest_has_processable_contents(entity_data) then
-                    entity_data.idle_empty_checks = 0
-                    set_digitizer_chest_queue(entity_data, "active")
-                elseif refresh_digitizer_chest_signals(entity_data) and entity_data.signal_active then
-                    entity_data.idle_empty_checks = 0
-                    set_digitizer_chest_queue(entity_data, "active")
+                else
+                    local signals, signals_checked = refresh_digitizer_chest_signals(entity_data)
+                    if signals and entity_data.signal_active then
+                        if entity_data.signals_changed or signals_checked then
+                            entity_data.has_unmet_signal_requests = digitizer_chest_has_unmet_signal_requests(entity_data, signals)
+                        end
+                        if entity_data.has_unmet_signal_requests then
+                            entity_data.idle_empty_checks = 0
+                            set_digitizer_chest_queue(entity_data, "active")
+                        end
+                    elseif digitizer_chest_has_processable_contents(entity_data) then
+                        entity_data.idle_empty_checks = 0
+                        set_digitizer_chest_queue(entity_data, "active")
+                    end
                 end
             end
             processed = processed + 1
@@ -978,14 +1287,30 @@ local function wake_digitizer_chest_long_idle_queue(iterations, batch_size)
                 local entity = entity_data.entity
                 if not entity or not entity.valid then
                     tracking.remove_tracked_entity(entity_data)
-                elseif digitizer_chest_has_processable_contents(entity_data) then
-                    entity_data.idle_empty_checks = 0
-                    set_digitizer_chest_queue(entity_data, "active")
-                elseif digitizer_chest_has_contents(entity_data) then
-                    entity_data.idle_empty_checks = 0
-                    set_digitizer_chest_queue(entity_data, "idle")
-                elseif game.tick >= (entity_data.next_signal_check_tick or 0) then
-                    set_digitizer_chest_queue(entity_data, "idle")
+                else
+                    local signals, signals_checked = refresh_digitizer_chest_signals(entity_data)
+                    if signals and entity_data.signal_active then
+                        if entity_data.signals_changed or signals_checked then
+                            entity_data.has_unmet_signal_requests = digitizer_chest_has_unmet_signal_requests(entity_data, signals)
+                        end
+                        if entity_data.has_unmet_signal_requests then
+                            entity_data.idle_empty_checks = 0
+                            set_digitizer_chest_queue(entity_data, "active")
+                        elseif digitizer_chest_has_contents(entity_data) then
+                            entity_data.idle_empty_checks = 0
+                            set_digitizer_chest_queue(entity_data, "idle")
+                        elseif game.tick >= (entity_data.next_signal_check_tick or 0) then
+                            set_digitizer_chest_queue(entity_data, "idle")
+                        end
+                    elseif digitizer_chest_has_processable_contents(entity_data) then
+                        entity_data.idle_empty_checks = 0
+                        set_digitizer_chest_queue(entity_data, "active")
+                    elseif digitizer_chest_has_contents(entity_data) then
+                        entity_data.idle_empty_checks = 0
+                        set_digitizer_chest_queue(entity_data, "idle")
+                    elseif game.tick >= (entity_data.next_signal_check_tick or 0) then
+                        set_digitizer_chest_queue(entity_data, "idle")
+                    end
                 end
             end
             processed = processed + 1
@@ -1019,45 +1344,89 @@ function tracking.on_tick_update_requests()
     end
 end
 
-script.on_nth_tick(5, function(event)
-    if storage.qf_enabled == false then return end
-    if next(storage.tracked_requests["repairs"]) and not storage.countdowns.in_combat then
-        storage.request_ids["repairs"] = flib_table.for_n_of(storage.tracked_requests["repairs"], storage.request_ids["repairs"], 2, function(request_table)
-            if not request_table.entity.valid then return nil, true, false end
-            if instant_repair(request_table.entity) then
-                return nil, true, false
-            else
-                return nil, false, false
-            end
-        end)
+function tracking.get_registered_nth_ticks()
+    local nth_tick_map = {
+        [5] = true,
+        [8] = true,
+        [9] = true,
+        [19] = true,
+        [84] = true,
+    }
+    for _, nth_tick in pairs(tracked_entity_nth_ticks) do
+        nth_tick_map[nth_tick] = true
     end
-end)
-
-script.on_nth_tick(9, function(event)
-    if storage.qf_enabled == false then return end
-    if next(storage.tracked_requests["item_requests"]) then
-        storage.request_ids["item_requests"] = flib_table.for_n_of(storage.tracked_requests["item_requests"], storage.request_ids["item_requests"], 2, function(request_table)
-            return tracking.update_item_request_proxy(request_table)
-        end)
+    local result = {}
+    for nth_tick, _ in pairs(nth_tick_map) do
+        table.insert(result, nth_tick)
     end
-end)
+    return result
+end
 
-
-script.on_nth_tick(19, function(event)
-    if storage.qf_enabled == false then return end
-    if next(storage.tracked_requests["cliffs"]) then
-        storage.request_ids["cliffs"] = flib_table.for_n_of(storage.tracked_requests["cliffs"], storage.request_ids["cliffs"], 3, function(request_table)
-            if not request_table.entity.valid then return nil, true, false end
-            if instant_decliffing(request_table.entity, request_table.player_index) then
-                return nil, true, false
-            else
-                return nil, false, false
-            end
-        end)
+function tracking.on_fixed_nth_tick(event)
+    if event.nth_tick == 5 then
+        if storage.qf_enabled == false then return end
+        if next(storage.tracked_requests["repairs"]) and not storage.countdowns.in_combat then
+            storage.request_ids["repairs"] = flib_table.for_n_of(storage.tracked_requests["repairs"], storage.request_ids["repairs"], 2, function(request_table)
+                if not request_table.entity.valid then return nil, true, false end
+                if instant_repair(request_table.entity) then
+                    return nil, true, false
+                else
+                    return nil, false, false
+                end
+            end)
+        end
+        return
     end
-end)
+    if event.nth_tick == 9 then
+        if storage.qf_enabled == false then return end
+        if next(storage.tracked_requests["item_requests"]) then
+            storage.request_ids["item_requests"] = flib_table.for_n_of(storage.tracked_requests["item_requests"], storage.request_ids["item_requests"], 2, function(request_table)
+                return tracking.update_item_request_proxy(request_table)
+            end)
+        end
+        return
+    end
+    if event.nth_tick == 19 then
+        if storage.qf_enabled == false then return end
+        if next(storage.tracked_requests["cliffs"]) then
+            storage.request_ids["cliffs"] = flib_table.for_n_of(storage.tracked_requests["cliffs"], storage.request_ids["cliffs"], 3, function(request_table)
+                if not request_table.entity.valid then return nil, true, false end
+                if instant_decliffing(request_table.entity, request_table.player_index) then
+                    return nil, true, false
+                else
+                    return nil, false, false
+                end
+            end)
+        end
+        return
+    end
+    if event.nth_tick == 84 then
+        if storage.qf_enabled == false then return end
+        if next(storage.tracked_entities["qf-storage-reader"]) then
+            storage.request_ids["qf-storage-reader"] = flib_table.for_n_of(storage.tracked_entities["qf-storage-reader"], storage.request_ids["qf-storage-reader"], 2, function(entity_data)
+                tracking.update_entity(entity_data)
+            end)
+        end
+        return
+    end
+    if event.nth_tick == 8 then
+        if storage.qf_enabled == false then return end
+        if next(storage.tracked_requests["construction"]) then
+            storage.request_ids["construction"] = flib_table.for_n_of(storage.tracked_requests["construction"], storage.request_ids["construction"], 3, function(request_table)
+                local entity = request_table.entity
+                local player_index = request_table.player_index
+                if not entity.valid then return nil, true, false end
+                if instant_fabrication(entity, player_index) then
+                    return nil, true, false
+                else
+                    return nil, false, false
+                end
+            end)
+        end
+    end
+end
 
-script.on_nth_tick(tracked_entity_nth_ticks, function(event)
+function tracking.on_tracked_entity_nth_tick(event)
     if event.nth_tick == digitizer_chest_signal_nth_tick then
         process_digitizer_chest_queue("signal", 1, 4)
     end
@@ -1075,32 +1444,7 @@ script.on_nth_tick(tracked_entity_nth_ticks, function(event)
     if event.nth_tick == Update_rate.reactors then
         tracking.update_tracked_reactors()
     end
-end)
-
-script.on_nth_tick(84, function(event)
-    if storage.qf_enabled == false then return end
-    if next(storage.tracked_entities["qf-storage-reader"]) then
-        storage.request_ids["qf-storage-reader"] = flib_table.for_n_of(storage.tracked_entities["qf-storage-reader"], storage.request_ids["qf-storage-reader"], 2, function(entity_data)
-            tracking.update_entity(entity_data)
-        end)
-    end
-end)
-
-script.on_nth_tick(8, function(event)
-    if storage.qf_enabled == false then return end
-    if next(storage.tracked_requests["construction"]) then
-        storage.request_ids["construction"] = flib_table.for_n_of(storage.tracked_requests["construction"], storage.request_ids["construction"], 3, function(request_table)
-            local entity = request_table.entity
-            local player_index = request_table.player_index
-            if not entity.valid then return nil, true, false end
-            if instant_fabrication(entity, player_index) then
-                return nil, true, false
-            else
-                return nil, false, false
-            end
-        end)
-    end
-end)
+end
 
 ---@param request_table RequestData
 ---@return nil
@@ -1242,6 +1586,10 @@ function tracking.add_tracked_entity(request_data)
     local entity = request_data.entity
     local player_index = request_data.player_index
     local tracked_entity_name = get_tracking_entity_name(entity.name)
+    local existing_entities = storage.tracked_entities[tracked_entity_name]
+    if existing_entities and existing_entities[entity.unit_number] then
+        return
+    end
 
     ---@type EntityData
     local entity_data = {
@@ -1258,6 +1606,7 @@ function tracking.add_tracked_entity(request_data)
     if tracked_entity_name == "digitizer-chest" then
         entity_data.inventory = entity.get_inventory(defines.inventory.chest)
         entity_data.settings.intake_limit = storage.options.default_intake_limit
+        entity_data.settings.reserve_limit = storage.options.default_reserve_limit or 0
         entity_data.settings.decraft = storage.options.default_decraft
         entity_data.settings.fluid_enabled = entity.name == "digitizer-chest" and storage.options.default_digitizer_chest_fluid_enabled == true
         entity_data.signal_active = true
@@ -1270,6 +1619,7 @@ function tracking.add_tracked_entity(request_data)
             fluids = {
                 name = "",
                 count = 0,
+                temperature = nil,
             },
             preprocessed_items = {},
         }
@@ -1378,6 +1728,27 @@ function tracking.clone_settings(source, destination)
     destination_data.settings = flib_table.deep_copy(source_data.settings)
 end
 
+---@param entity LuaEntity
+---@return Tags?
+function tracking.export_blueprint_settings(entity)
+    local entity_data = tracking.get_entity_data(entity)
+    if not entity_data or not entity_data.settings then return nil end
+    return flib_table.deep_copy(entity_data.settings)
+end
+
+---@param entity LuaEntity
+---@param blueprint_settings Tags?
+function tracking.apply_blueprint_settings(entity, blueprint_settings)
+    if not blueprint_settings then return end
+    local entity_data = tracking.get_entity_data(entity)
+    if not entity_data and Trackable_entities[entity.name] then
+        tracking.create_tracked_request({request_type = "entities", entity = entity})
+        entity_data = tracking.get_entity_data(entity)
+    end
+    if not entity_data then return end
+    entity_data.settings = flib_table.deep_copy(blueprint_settings)
+end
+
 ---@param entity_data EntityData
 function tracking.update_entity(entity_data)
     local entity = entity_data.entity
@@ -1401,6 +1772,7 @@ function tracking.update_entity(entity_data)
         local requester_buffered = entity.name == "digitizer-requester-chest"
         local signal_fetchable = fetchable or requester_buffered
         local limit_value = entity_data.settings.intake_limit
+        local reserve_limit = entity_data.settings.reserve_limit or 0
         local decraft = entity_data.settings.decraft
         local storage_index = surface_index
         local update_temp_data = get_digitizer_update_temp_data(entity_data, storage_index)
@@ -1422,6 +1794,8 @@ function tracking.update_entity(entity_data)
         end
         local signals = refresh_digitizer_chest_signals(entity_data)
         if not entity_data.signal_active then
+            entity_data.has_unmet_signal_requests = false
+            entity_data.parsed_signal_requests = nil
             local storage_surface = storage.fabricator_inventory[storage_index]
             local storage_items = storage_surface.item
             local storage_fluids = storage_surface.fluid
@@ -1429,21 +1803,35 @@ function tracking.update_entity(entity_data)
             if inventory and not inventory.is_empty() then
                 local inventory_contents = inventory.get_contents()
                 item_qs_item.surface_index = storage_index
+                -- 这里会先按 removable_count 入仓，再尝试从箱子里移除；reserve_limit 为负时会保留当前放大量行为
                 if limit_value == 0 then
                     if next(inventory_contents) then
-                        qs_utils.add_item_contents_to_storage(storage_index, inventory_contents, decraft)
-                        inventory.clear()
-                        moved_contents = true
+                        for _, item in pairs(inventory_contents) do
+                            local removable_count = item.count - reserve_limit
+                            if removable_count > 0 then
+                                item_qs_item.name = item.name
+                                item_qs_item.count = removable_count
+                                item_qs_item.quality = item.quality
+                                qs_utils.add_to_storage(item_qs_item, decraft)
+                                item_remove_params.name = item.name
+                                item_remove_params.count = removable_count
+                                item_remove_params.quality = item.quality
+                                inventory.remove(item_remove_params)
+                                moved_contents = true
+                            end
+                        end
                     end
                 else
                     for _, item in pairs(inventory_contents) do
-                        if storage_items[item.name][item.quality] < limit_value then
+                        local removable_count = item.count - reserve_limit
+                        local remaining_capacity = digitizer_intake_limit_remaining_capacity(item.name, item.quality, storage_index, storage_items, limit_value, decraft)
+                        if removable_count > 0 and remaining_capacity > 0 then
                             item_qs_item.name = item.name
-                            item_qs_item.count = item.count
+                            item_qs_item.count = math.min(removable_count, remaining_capacity)
                             item_qs_item.quality = item.quality
                             qs_utils.add_to_storage(item_qs_item, decraft)
                             item_remove_params.name = item.name
-                            item_remove_params.count = item.count
+                            item_remove_params.count = item_qs_item.count
                             item_remove_params.quality = item.quality
                             inventory.remove(item_remove_params)
                             moved_contents = true
@@ -1456,22 +1844,27 @@ function tracking.update_entity(entity_data)
                 item_qs_fluid.surface_index = storage_index
                 if limit_value == 0 then
                     for name, count in pairs(fluid_contents) do
-                        item_qs_fluid.name = name
-                        item_qs_fluid.count = count
-                        qs_utils.add_to_storage(item_qs_fluid)
-                        fluid_remove_params.name = name
-                        fluid_remove_params.amount = count
-                        entity_data.container_fluid.remove_fluid(fluid_remove_params)
-                        moved_contents = true
+                        local removable_count = count - reserve_limit
+                        if removable_count > 0 then
+                            item_qs_fluid.name = name
+                            item_qs_fluid.count = removable_count
+                            qs_utils.add_to_storage(item_qs_fluid)
+                            fluid_remove_params.name = name
+                            fluid_remove_params.amount = removable_count
+                            entity_data.container_fluid.remove_fluid(fluid_remove_params)
+                            moved_contents = true
+                        end
                     end
                 else
                     for name, count in pairs(fluid_contents) do
-                        if storage_fluids[name][QS_DEFAULT_QUALITY] < limit_value then
+                        local removable_count = count - reserve_limit
+                        local remaining_capacity = limit_value - storage_fluids[name][QS_DEFAULT_QUALITY]
+                        if removable_count > 0 and remaining_capacity > 0 then
                             item_qs_fluid.name = name
-                            item_qs_fluid.count = count
+                            item_qs_fluid.count = math.min(removable_count, remaining_capacity)
                             qs_utils.add_to_storage(item_qs_fluid)
                             fluid_remove_params.name = name
-                            fluid_remove_params.amount = count
+                            fluid_remove_params.amount = item_qs_fluid.count
                             entity_data.container_fluid.remove_fluid(fluid_remove_params)
                             moved_contents = true
                         end
@@ -1497,60 +1890,23 @@ function tracking.update_entity(entity_data)
             return
         end
         entity_data.idle_empty_checks = 0
+        local had_unmet_signal_requests = digitizer_chest_has_unmet_signal_requests(entity_data, signals)
+        entity_data.has_unmet_signal_requests = had_unmet_signal_requests
+        local has_unmet_signal_requests_after = false
 
-        local fixed_quantity = 0
-        local quality = "normal"
-        local inventory_processing = get_digitizer_inventory_processing(entity_data)
-        reset_digitizer_inventory_processing(inventory_processing)
+        local parsed = get_digitizer_signal_request_parse(entity_data, signals, signal_fetchable)
+        local fixed_quantity = parsed and parsed.fixed_quantity or 0
+        local inventory_processing = load_digitizer_signal_request_processing(entity_data, parsed)
         local processing_items = inventory_processing.items
         local processing_fluids = inventory_processing.fluids
-        local preprocessed_items = inventory_processing.preprocessed_items
-        if signals then
-            for _, signal in pairs(signals) do
-                if signal.count > 0 then
-                    if (signal.signal.type == nil or signal.signal.type == "item") and signal_fetchable then
-                        local item_quality = signal.signal.quality
-                        if item_quality then
-                            add_digitizer_requested_item(processing_items, signal.signal.name, item_quality, signal.count)
-                        else
-                            preprocessed_items[signal.signal.name] = (preprocessed_items[signal.signal.name] or 0) + signal.count
-                        end
-                    elseif signal.signal.type == "fluid" and signal_fetchable then
-                        -- Only fluid with the highest signal count will be added
-                        if signal.count > processing_fluids.count then
-                            processing_fluids.name = signal.signal.name
-                            processing_fluids.count = signal.count
-                        end
-                    elseif signal.signal.type == "virtual" then
-                        if signal.signal.name == "signal-S" then
-                            storage_index = signal.count
-                        elseif signal.signal.name == "signal-L" then
-                            limit_value = signal.count
-                        elseif signal.signal.name == "signal-D" then
-                            decraft = signal.count > 0
-                        elseif signal.signal.name == "signal-F" then
-                            fixed_quantity = signal.count
-                        end
-                    elseif signal.signal.type == "quality" then
-                        quality = signal.signal.name
-                    end
-                end
-            end
-            for item_name, item_count in pairs(preprocessed_items) do
-                add_digitizer_requested_item(processing_items, item_name, quality, item_count)
-            end
+        if parsed and parsed.limit_value then
+            limit_value = parsed.limit_value
         end
-
-        -- Set fixed quantity if it exists
-        if fixed_quantity > 0 then
-            for _, item_by_quality in pairs(processing_items) do
-                for item_quality, _ in pairs(item_by_quality) do
-                    item_by_quality[item_quality] = fixed_quantity
-                end
-            end
-            if processing_fluids.count > 0 then
-                processing_fluids.count = fixed_quantity
-            end
+        if parsed and parsed.decraft ~= nil then
+            decraft = parsed.decraft
+        end
+        if parsed then
+            storage_index = parsed.storage_index
         end
 
         -- We are only allower to select storage_index if the map setting is enabled
@@ -1562,24 +1918,30 @@ function tracking.update_entity(entity_data)
         local storage_fluids = storage_surface.fluid
 
         if inventory then
+            local read_contents = digitizer_chest_reads_contents(entity)
+            local inventory_contents
             if not inventory.is_empty() then
-                local inventory_contents = inventory.get_contents()
-                -- If the container has "Read contents" checked, then we'll need to substract stored items from a signal value later
-                local read_contents = digitizer_chest_reads_contents(entity)
+                inventory_contents = inventory.get_contents()
+                -- 如果箱子会把库存回读到电路网络，则先把现有库存从请求信号里扣掉
+                if read_contents and fixed_quantity == 0 then
+                    for _, item in pairs(inventory_contents) do
+                        local item_by_quality = processing_items[item.name]
+                        if item_by_quality and item_by_quality[item.quality] then
+                            item_by_quality[item.quality] = item_by_quality[item.quality] - item.count
+                        end
+                    end
+                end
                 item_qs_item.surface_index = storage_index
                 for _, item in pairs(inventory_contents) do
+                    local total_count = item.count
                     item_qs_item.name = item.name
-                    item_qs_item.count = item.count
+                    item_qs_item.count = total_count
                     item_qs_item.quality = item.quality
                     local removable = true
                     -- if we have a signal for this item and that quality...
                     local item_by_quality = processing_items[item.name]
                     local requested_count = item_by_quality and item_by_quality[item.quality]
                     if requested_count then
-                        -- Substracting "fake" requests, but only if we didn't already set count to fixed value
-                        if read_contents and fixed_quantity == 0 then
-                            requested_count = requested_count - item_qs_item.count
-                        end
                         -- Deciding what to do with items - store, fetch or ignore
                         if item_qs_item.count == requested_count then
                             item_by_quality[item.quality] = nil
@@ -1593,7 +1955,17 @@ function tracking.update_entity(entity_data)
                         end
                     end
                     if removable then
-                        if limit_value == 0 or storage_items[item_qs_item.name][item_qs_item.quality] < limit_value then
+                        local removable_count = total_count - reserve_limit
+                        if item_qs_item.count > removable_count then
+                            item_qs_item.count = removable_count
+                        end
+                        if limit_value ~= 0 then
+                            local remaining_capacity = digitizer_intake_limit_remaining_capacity(item_qs_item.name, item_qs_item.quality, storage_index, storage_items, limit_value, decraft)
+                            if item_qs_item.count > remaining_capacity then
+                                item_qs_item.count = remaining_capacity
+                            end
+                        end
+                        if item_qs_item.count > 0 then
                             qs_utils.add_to_storage(item_qs_item, decraft)
                             item_remove_params.name = item_qs_item.name
                             item_remove_params.count = item_qs_item.count
@@ -1606,15 +1978,31 @@ function tracking.update_entity(entity_data)
             for item_name, item_by_quality in pairs(processing_items) do
                 for item_quality, item_count in pairs(item_by_quality) do
                     if item_count > 0 then
-                        local available_in_storage = storage_items[item_name] and storage_items[item_name][item_quality] or 0
+                        local remaining_item_count = item_count
                         item_qs_item.name = item_name
                         item_qs_item.count = item_count
                         item_qs_item.quality = item_quality
                         item_qs_item.surface_index = storage_index
+                        local requested_item_count = item_qs_item.count
                         local pull_status = qs_utils.pull_from_storage(item_qs_item, inventory)
-                        if available_in_storage < item_count and not pull_status.full_inventory and fetchable then
-                            item_qs_item.count = item_count - available_in_storage
+                        local pulled_item_count = item_qs_item.count
+                        if pull_status.empty_storage and pulled_item_count == requested_item_count then
+                            pulled_item_count = 0
+                        end
+                        remaining_item_count = remaining_item_count - pulled_item_count
+                        if remaining_item_count > 0 and not pull_status.full_inventory and fetchable then
+                            item_qs_item.count = remaining_item_count
                             fabricate_digitizer_requested_item(item_qs_item, inventory)
+                            remaining_item_count = remaining_item_count - item_qs_item.count
+                        end
+                        if remaining_item_count > 0 then
+                            item_by_quality[item_quality] = remaining_item_count
+                            has_unmet_signal_requests_after = true
+                        else
+                            item_by_quality[item_quality] = nil
+                        end
+                        if pull_status.full_inventory then
+                            has_unmet_signal_requests_after = true
                         end
                     end
                 end
@@ -1622,40 +2010,78 @@ function tracking.update_entity(entity_data)
         end
         local fluid_contents = entity_data.container_fluid and entity_data.container_fluid.get_fluid_contents()
         if fluid_contents then
+            local current_fluid = get_container_fluid_state(entity_data.container_fluid)
             item_qs_fluid.surface_index = storage_index
+            item_qs_fluid.temperature = nil
             for name, count in pairs(fluid_contents) do
                 item_qs_fluid.name = name
                 item_qs_fluid.count = count
                 local removable = true
+                local replace_requested_fluid = processing_fluids.count > 0
+                    and name == processing_fluids.name
+                    and not fluid_temperatures_match(current_fluid and current_fluid.temperature or nil, processing_fluids.temperature)
                 if processing_fluids.count > 0 then
-                    if item_qs_fluid.count == processing_fluids.count then
+                    if not replace_requested_fluid and item_qs_fluid.count == processing_fluids.count then
                         processing_fluids.count = 0
                         removable = false
-                    elseif item_qs_fluid.count > processing_fluids.count then
+                    elseif not replace_requested_fluid and item_qs_fluid.count > processing_fluids.count then
                         item_qs_fluid.count = item_qs_fluid.count - processing_fluids.count
                         processing_fluids.count = 0
-                    else
+                    elseif not replace_requested_fluid then
                         processing_fluids.count = processing_fluids.count - item_qs_fluid.count
                         removable = false
                     end
                 end
                 if removable then
-                    if limit_value == 0 or storage_fluids[name][QS_DEFAULT_QUALITY] < limit_value then
+                    local removable_count = count
+                    if not replace_requested_fluid then
+                        removable_count = count - reserve_limit
+                    end
+                    if item_qs_fluid.count > removable_count then
+                        item_qs_fluid.count = removable_count
+                    end
+                    if not replace_requested_fluid and limit_value ~= 0 then
+                        local remaining_capacity = limit_value - storage_fluids[name][QS_DEFAULT_QUALITY]
+                        if item_qs_fluid.count > remaining_capacity then
+                            item_qs_fluid.count = remaining_capacity
+                        end
+                    end
+                    if item_qs_fluid.count > 0 then
                         qs_utils.add_to_storage(item_qs_fluid)
                         fluid_remove_params.name = name
-                        fluid_remove_params.amount = count
+                        fluid_remove_params.amount = item_qs_fluid.count
                         entity_data.container_fluid.remove_fluid(fluid_remove_params)
                     end
                 end
             end
             if processing_fluids.count > 0 then
+                local remaining_fluid_count = processing_fluids.count
                 item_qs_fluid.name = processing_fluids.name
                 item_qs_fluid.count = processing_fluids.count
+                item_qs_fluid.temperature = processing_fluids.temperature
                 item_qs_fluid.surface_index = storage_index
-                qs_utils.pull_from_storage(item_qs_fluid, entity_data.container_fluid)
+                local requested_fluid_count = item_qs_fluid.count
+                local pull_status = qs_utils.pull_from_storage(item_qs_fluid, entity_data.container_fluid)
+                local pulled_fluid_count = item_qs_fluid.count
+                if pull_status.empty_storage and pulled_fluid_count == requested_fluid_count then
+                    pulled_fluid_count = 0
+                end
+                remaining_fluid_count = remaining_fluid_count - pulled_fluid_count
+                processing_fluids.count = remaining_fluid_count
+                if remaining_fluid_count > 0 or pull_status.full_inventory then
+                    has_unmet_signal_requests_after = true
+                end
             end
         end
-        set_digitizer_chest_queue(entity_data, "signal")
+        if had_unmet_signal_requests then
+            entity_data.active_until_tick = game.tick + digitizer_chest_active_keepalive_ticks
+        end
+        entity_data.has_unmet_signal_requests = has_unmet_signal_requests_after
+        if has_unmet_signal_requests_after or game.tick <= entity_data.active_until_tick then
+            set_digitizer_chest_queue(entity_data, "signal")
+        else
+            set_digitizer_chest_queue(entity_data, "idle")
+        end
         return
     end
 
