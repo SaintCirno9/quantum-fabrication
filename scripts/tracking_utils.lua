@@ -1809,7 +1809,6 @@ function tracking.on_fixed_nth_tick(event)
         return
     end
     if event.nth_tick == 84 then
-        if storage.qf_enabled == false then return end
         if next(storage.tracked_entities["qf-storage-reader"]) then
             storage.request_ids["qf-storage-reader"] = flib_table.for_n_of(storage.tracked_entities["qf-storage-reader"], storage.request_ids["qf-storage-reader"], 2, function(entity_data)
                 tracking.update_entity(entity_data)

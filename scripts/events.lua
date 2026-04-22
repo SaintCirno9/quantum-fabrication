@@ -752,11 +752,11 @@ end
 
 function on_tick(event)
     flib_dictionary.on_tick(event)
-    if storage.qf_enabled == false then return end
     tracking.on_tick_update_digitizer_queues()
+    qs_utils.process_decraft_queue(8)
+    if storage.qf_enabled == false then return end
     tracking.on_tick_update_requests()
     tracking.update_lost_module_requests_neo()
-    qs_utils.process_decraft_queue(8)
 end
 
 function post_research_recheck()
@@ -820,11 +820,12 @@ local function on_registered_nth_tick(event)
         refresh_digitizer_hover_texts()
     end
     if event.nth_tick == 11 then
-        if storage.qf_enabled then
-            for type, countdown in pairs(storage.countdowns) do
-                if countdown then
+        for type, countdown in pairs(storage.countdowns) do
+            if countdown then
+                local gated_by_qf_toggle = type == "tile_creation" or type == "in_combat" or type == "tile_removal"
+                if not gated_by_qf_toggle or storage.qf_enabled then
                     storage.countdowns[type] = storage.countdowns[type] - 1
-                    if countdown == 0 then
+                    if storage.countdowns[type] == 0 then
                         storage.countdowns[type] = nil
                         if type == "tile_creation" then
                             instant_tileation()
