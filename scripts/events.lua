@@ -21,7 +21,6 @@ commands.add_command("qf_hesoyam", nil, console_events.on_console_command)
 commands.add_command("qf_hesoyam_harder", nil, console_events.on_console_command)
 commands.add_command("qf_debug_command", nil, console_events.on_console_command)
 commands.add_command("qf_reprocess_recipes", nil, console_events.on_console_command)
-commands.add_command("qf_dump_digitizer_queues", nil, console_events.on_console_command)
 script.on_nth_tick(tick_events.get_registered_nth_ticks(), tick_events.on_registered_nth_tick)
 
 script.on_event(defines.events.on_runtime_mod_setting_changed, init_events.on_mod_settings_changed)

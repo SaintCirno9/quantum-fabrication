@@ -341,150 +341,6 @@ function tracking.rebuild_digitizer_chest_queues()
     end
 end
 
-function tracking.dump_digitizer_chest_queues(max_entries, player_index)
-    local limit = tonumber(max_entries)
-    local print_details = limit ~= nil
-    if print_details and limit < 1 then
-        limit = 1
-    end
-
-    local player = player_index and game.get_player(player_index) or nil
-    local output = player and function(text) player.print(text) end or function(text) game.print(text) end
-
-    local tracked_queues = storage.tracked_entity_queues and storage.tracked_entity_queues["digitizer-chest"]
-    if not tracked_queues then
-        output("[QF][QueueDump] No digitizer queue storage")
-        return
-    end
-    local queues = {
-        signal = tracked_queues.signal or {},
-        active = tracked_queues.active or {},
-        idle = tracked_queues.idle or {},
-        long_idle = tracked_queues.long_idle or {},
-    }
-    local queue_names = Digitizer_chest_queue_names
-    local total = 0
-    for _, queue_name in pairs(queue_names) do
-        for _, _ in pairs(queues[queue_name]) do
-            total = total + 1
-        end
-    end
-
-    local queue_runtime = {
-        signal = {nth_tick = digitizer_chest_signal_nth_tick, base_batch_size = 4, iterations = 1},
-        active = {nth_tick = digitizer_chest_active_nth_tick, base_batch_size = 4, iterations = 1},
-        idle = {nth_tick = digitizer_chest_idle_nth_tick, base_batch_size = 2, iterations = 1},
-        long_idle = {nth_tick = digitizer_chest_long_idle_nth_tick, base_batch_size = 1, iterations = 1},
-    }
-
-    output("[QF][QueueDump] Begin tick=" .. game.tick .. " total=" .. total)
-    for _, queue_name in pairs(queue_names) do
-        local queue = queues[queue_name]
-        local entries = {}
-        for unit_number, entity_data in pairs(queue) do
-            entries[#entries + 1] = {unit_number = unit_number, entity_data = entity_data}
-        end
-        table.sort(entries, function(a, b) return a.unit_number < b.unit_number end)
-        local runtime = queue_runtime[queue_name]
-        local dynamic_batch_size = runtime.base_batch_size
-        if #entries > runtime.base_batch_size then
-            dynamic_batch_size = math.ceil(#entries / digitizer_queue_dynamic_batch_divisor)
-            if dynamic_batch_size < runtime.base_batch_size then
-                dynamic_batch_size = runtime.base_batch_size
-            end
-        end
-        local work_per_tick = runtime.iterations * dynamic_batch_size / runtime.nth_tick
-        local max_work_per_tick = digitizer_queue_max_work_per_tick[queue_name]
-        if max_work_per_tick and work_per_tick > max_work_per_tick then
-            work_per_tick = max_work_per_tick
-        end
-        local runs_needed = 0
-        local estimated_ticks = 0
-        local estimated_seconds = 0
-        if #entries > 0 and work_per_tick > 0 then
-            estimated_ticks = math.ceil(#entries / work_per_tick)
-            runs_needed = math.ceil(estimated_ticks / runtime.nth_tick)
-            estimated_seconds = estimated_ticks / 60
-        end
-        output("[QF][QueueDump] Queue "
-            .. queue_name
-            .. " count=" .. #entries
-            .. " nth_tick=" .. runtime.nth_tick
-            .. " base_batch=" .. runtime.base_batch_size
-            .. " dynamic_batch=" .. dynamic_batch_size
-            .. " work_per_tick=" .. string.format("%.2f", work_per_tick)
-            .. " runs=" .. runs_needed
-            .. " full_pass_ticks=" .. estimated_ticks
-            .. " full_pass_seconds=" .. string.format("%.2f", estimated_seconds))
-        if not print_details then
-            goto continue
-        end
-        local dumped = 0
-        for _, row in pairs(entries) do
-            if dumped >= limit then
-                break
-            end
-            dumped = dumped + 1
-            local entity_data = row.entity_data
-            local entity = entity_data and entity_data.entity
-            local entity_name = "nil"
-            local valid = false
-            local surface_index = -1
-            if entity and entity.valid then
-                valid = true
-                entity_name = entity.name
-                surface_index = entity.surface_index
-            end
-
-            local inventory_count = 0
-            if entity_data and entity_data.inventory and not entity_data.inventory.is_empty() then
-                local inventory_contents = entity_data.inventory.get_contents()
-                for _, item in pairs(inventory_contents) do
-                    inventory_count = inventory_count + item.count
-                end
-            end
-
-            local fluid_count = 0
-            if entity_data and entity_data.container_fluid and entity_data.container_fluid.valid then
-                local fluids = entity_data.container_fluid.get_fluid_contents()
-                for _, amount in pairs(fluids) do
-                    fluid_count = fluid_count + amount
-                end
-            end
-
-            local signal_count = entity_data and entity_data.cached_signals and #entity_data.cached_signals or 0
-            local queue_state = entity_data and entity_data.queue_name or "nil"
-            local next_signal_check_tick = entity_data and entity_data.next_signal_check_tick or -1
-            local signal_check_interval_ticks = entity_data and entity_data.signal_check_interval_ticks or -1
-            local has_live_signal = false
-            if valid then
-                local live_signals = entity.get_signals(defines.wire_connector_id.circuit_red, defines.wire_connector_id.circuit_green)
-                has_live_signal = live_signals ~= nil and next(live_signals) ~= nil
-            end
-
-            output("[QF][QueueDump] "
-                .. queue_name
-                .. " unit=" .. row.unit_number
-                .. " name=" .. entity_name
-                .. " valid=" .. tostring(valid)
-                .. " surface=" .. surface_index
-                .. " inv=" .. inventory_count
-                .. " fluid=" .. fluid_count
-                .. " queue_name=" .. queue_state
-                .. " signal_active=" .. tostring(entity_data and entity_data.signal_active or false)
-                .. " cached_signal_count=" .. signal_count
-                .. " next_signal_check_tick=" .. next_signal_check_tick
-                .. " signal_check_interval_ticks=" .. signal_check_interval_ticks
-                .. " live_signal=" .. tostring(has_live_signal))
-        end
-        if #entries > limit then
-            output("[QF][QueueDump] Queue " .. queue_name .. " truncated=" .. (#entries - limit))
-        end
-        ::continue::
-    end
-    output("[QF][QueueDump] End")
-end
-
 local function signals_equal_ordered(signals_a, signals_b)
     if signals_a == signals_b then
         return true
@@ -1148,6 +1004,12 @@ local function get_digitizer_entity_next_dispatch_tick(entity_data)
     end
 
     local wake_tick = entity_data.next_signal_check_tick
+    if entity_data.signal_active then
+        if wake_tick == nil or wake_tick <= game.tick then
+            return game.tick + digitizer_chest_signal_nth_tick
+        end
+        return wake_tick
+    end
     local processable_tick = entity_data.next_processable_recheck_tick
     if processable_tick ~= nil and (wake_tick == nil or processable_tick < wake_tick) then
         wake_tick = processable_tick

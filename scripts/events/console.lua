@@ -33,10 +33,6 @@ function handlers.on_console_command(command)
         process_unpacking()
         process_ingredient_filter()
         Product_craft_data_anti_overwrite_flag = false
-    elseif name == "qf_dump_digitizer_queues" then
-        local limit = tonumber(command.parameter)
-        tracking.dump_digitizer_chest_queues(limit, player_index)
-        game.print("Digitizer queue dump printed to chat")
     end
 end
 
