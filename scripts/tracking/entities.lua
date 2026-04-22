@@ -11,8 +11,6 @@ return function(context)
     local digitizer_chest_signal_recheck_ticks = context.digitizer_chest_signal_recheck_ticks
     local digitizer_chest_active_keepalive_ticks = context.digitizer_chest_active_keepalive_ticks
     local digitizer_chest_processable_recheck_ticks = context.digitizer_chest_processable_recheck_ticks
-    local begin_instrument_sample = context.begin_instrument_sample
-    local end_instrument_sample = context.end_instrument_sample
 
     function tracking.add_tracked_entity(request_data)
         local entity = request_data.entity
@@ -305,18 +303,14 @@ return function(context)
                 control_behavior.add_section()
             end
             local storage_index
-            local read_config_profiler = begin_instrument_sample()
             for _, signal in pairs(control_behavior.get_section(1).filters) do
                 if signal.value.name == "signal-S" then
                     storage_index = signal.min
                 end
             end
             if not storage_index or not storage.fabricator_inventory[storage_index] then storage_index = entity_data.surface_index end
-            end_instrument_sample(read_config_profiler, "tracking.update_entity.qf-storage-reader.read_config")
             local signals = qs_utils.get_storage_signals(storage_index)
-            local write_filters_profiler = begin_instrument_sample()
             control_behavior.get_section(2).filters = signals
-            end_instrument_sample(write_filters_profiler, "tracking.update_entity.qf-storage-reader.write_filters")
             return
         end
     end

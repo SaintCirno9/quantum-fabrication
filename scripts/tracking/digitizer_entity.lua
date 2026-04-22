@@ -4,8 +4,6 @@ return function(context)
     local sync_digitizer_chest_fluid_setting = context.sync_digitizer_chest_fluid_setting
     local get_digitizer_update_temp_data = context.get_digitizer_update_temp_data
     local refresh_digitizer_chest_signals = context.refresh_digitizer_chest_signals
-    local begin_digitizer_phase_sample = context.begin_digitizer_phase_sample
-    local end_digitizer_phase_sample = context.end_digitizer_phase_sample
     local digitizer_chest_has_processable_contents = context.digitizer_chest_has_processable_contents
     local digitizer_chest_has_contents = context.digitizer_chest_has_contents
     local set_digitizer_chest_queue = context.set_digitizer_chest_queue
@@ -67,14 +65,10 @@ return function(context)
             local storage_fluids = storage_surface.fluid
             local moved_contents = false
             if inventory and not inventory.is_empty() then
-                local no_signal_inventory_profiler, no_signal_inventory_stat_name = begin_digitizer_phase_sample(entity_data, "no_signal.inventory")
-                local no_signal_get_contents_profiler, no_signal_get_contents_stat_name = begin_digitizer_phase_sample(entity_data, "no_signal.inventory.get_contents")
                 local inventory_contents = inventory.get_contents()
-                end_digitizer_phase_sample(no_signal_get_contents_profiler, no_signal_get_contents_stat_name)
                 item_qs_item.surface_index = storage_index
                 if limit_value == 0 then
                     if next(inventory_contents) then
-                        local no_signal_store_profiler, no_signal_store_stat_name = begin_digitizer_phase_sample(entity_data, "no_signal.inventory.store")
                         if reserve_limit == 0 then
                             qs_utils.add_item_contents_to_storage(storage_index, inventory_contents, decraft)
                             inventory.clear()
@@ -95,10 +89,8 @@ return function(context)
                                 end
                             end
                         end
-                        end_digitizer_phase_sample(no_signal_store_profiler, no_signal_store_stat_name)
                     end
                 else
-                    local no_signal_limited_profiler, no_signal_limited_stat_name = begin_digitizer_phase_sample(entity_data, "no_signal.inventory.store_limited")
                     for _, item in pairs(inventory_contents) do
                         local removable_count = item.count - reserve_limit
                         local remaining_capacity = digitizer_intake_limit_remaining_capacity(item.name, item.quality, storage_index, storage_items, limit_value, decraft)
@@ -114,13 +106,10 @@ return function(context)
                             moved_contents = true
                         end
                     end
-                    end_digitizer_phase_sample(no_signal_limited_profiler, no_signal_limited_stat_name)
                 end
-                end_digitizer_phase_sample(no_signal_inventory_profiler, no_signal_inventory_stat_name)
             end
             local fluid_contents = entity_data.container_fluid and entity_data.container_fluid.get_fluid_contents()
             if fluid_contents then
-                local no_signal_fluid_profiler, no_signal_fluid_stat_name = begin_digitizer_phase_sample(entity_data, "no_signal.fluid")
                 item_qs_fluid.surface_index = storage_index
                 if limit_value == 0 then
                     for name, count in pairs(fluid_contents) do
@@ -150,9 +139,7 @@ return function(context)
                         end
                     end
                 end
-                end_digitizer_phase_sample(no_signal_fluid_profiler, no_signal_fluid_stat_name)
             end
-            local no_signal_queue_profiler, no_signal_queue_stat_name = begin_digitizer_phase_sample(entity_data, "no_signal.queue")
             if moved_contents then
                 entity_data.active_until_tick = game.tick + digitizer_chest_active_keepalive_ticks
             end
@@ -169,7 +156,6 @@ return function(context)
                     set_digitizer_chest_queue(entity_data, "idle")
                 end
             end
-            end_digitizer_phase_sample(no_signal_queue_profiler, no_signal_queue_stat_name)
             return
         end
         entity_data.idle_empty_checks = 0
@@ -178,7 +164,6 @@ return function(context)
         local pulled_signal_contents = false
         local read_contents = false
 
-        local signal_prepare_profiler, signal_prepare_stat_name = begin_digitizer_phase_sample(entity_data, "signal.prepare")
         local parsed = get_digitizer_signal_request_parse(entity_data, signals, signal_fetchable)
         local fixed_quantity = parsed and parsed.fixed_quantity or 0
         local processing_items = parsed and parsed.items or {}
@@ -195,7 +180,6 @@ return function(context)
         if parsed then
             storage_index = parsed.storage_index
         end
-        end_digitizer_phase_sample(signal_prepare_profiler, signal_prepare_stat_name)
 
         local function ensure_processing_items_mutable()
             if processing_items_mutable or not parsed then
@@ -216,10 +200,7 @@ return function(context)
             read_contents = digitizer_chest_reads_contents(entity)
             local inventory_contents
             if not inventory.is_empty() then
-                local signal_balance_profiler, signal_balance_stat_name = begin_digitizer_phase_sample(entity_data, "signal.inventory_balance")
-                local signal_get_contents_profiler, signal_get_contents_stat_name = begin_digitizer_phase_sample(entity_data, "signal.inventory.get_contents")
                 inventory_contents = inventory.get_contents()
-                end_digitizer_phase_sample(signal_get_contents_profiler, signal_get_contents_stat_name)
                 ensure_processing_items_mutable()
                 item_qs_item.surface_index = storage_index
                 local batch_item_count = 0
@@ -286,9 +267,7 @@ return function(context)
                         end
                     end
                 end
-                end_digitizer_phase_sample(signal_balance_profiler, signal_balance_stat_name)
             end
-            local signal_pull_profiler, signal_pull_stat_name = begin_digitizer_phase_sample(entity_data, "signal.inventory_pull")
             for item_name, item_by_quality in pairs(processing_items) do
                 for item_quality, item_count in pairs(item_by_quality) do
                     if item_count > 0 then
@@ -298,9 +277,7 @@ return function(context)
                         item_qs_item.quality = item_quality
                         item_qs_item.surface_index = storage_index
                         local requested_item_count = item_qs_item.count
-                        local storage_pull_profiler, storage_pull_stat_name = begin_digitizer_phase_sample(entity_data, "signal.inventory_pull.storage")
                         local empty_storage, full_inventory = qs_utils.pull_from_storage(item_qs_item, inventory)
-                        end_digitizer_phase_sample(storage_pull_profiler, storage_pull_stat_name)
                         local pulled_item_count = item_qs_item.count
                         if empty_storage and pulled_item_count == requested_item_count then
                             pulled_item_count = 0
@@ -311,9 +288,7 @@ return function(context)
                         end
                         if remaining_item_count > 0 and not full_inventory and fetchable then
                             item_qs_item.count = remaining_item_count
-                            local fabricate_pull_profiler, fabricate_pull_stat_name = begin_digitizer_phase_sample(entity_data, "signal.inventory_pull.fabricate")
                             fabricate_digitizer_requested_item(item_qs_item, inventory)
-                            end_digitizer_phase_sample(fabricate_pull_profiler, fabricate_pull_stat_name)
                             if item_qs_item.count > 0 then
                                 pulled_signal_contents = true
                             end
@@ -335,11 +310,9 @@ return function(context)
                     end
                 end
             end
-            end_digitizer_phase_sample(signal_pull_profiler, signal_pull_stat_name)
         end
         local fluid_contents = entity_data.container_fluid and entity_data.container_fluid.get_fluid_contents()
         if fluid_contents then
-            local signal_fluid_profiler, signal_fluid_stat_name = begin_digitizer_phase_sample(entity_data, "signal.fluid")
             local current_fluid = get_container_fluid_state(entity_data.container_fluid)
             item_qs_fluid.surface_index = storage_index
             item_qs_fluid.temperature = nil
@@ -405,18 +378,15 @@ return function(context)
                     has_unmet_signal_requests_after = true
                 end
             end
-            end_digitizer_phase_sample(signal_fluid_profiler, signal_fluid_stat_name)
         end
         if had_unmet_signal_requests or pulled_signal_contents then
             entity_data.active_until_tick = game.tick + digitizer_chest_active_keepalive_ticks
         end
         entity_data.has_unmet_signal_requests = has_unmet_signal_requests_after
-        local signal_queue_profiler, signal_queue_stat_name = begin_digitizer_phase_sample(entity_data, "signal.queue")
         if has_unmet_signal_requests_after or game.tick <= entity_data.active_until_tick then
             set_digitizer_chest_queue(entity_data, "signal")
         else
             set_digitizer_chest_queue(entity_data, "idle")
         end
-        end_digitizer_phase_sample(signal_queue_profiler, signal_queue_stat_name)
     end
 end
