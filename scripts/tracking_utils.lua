@@ -115,7 +115,8 @@ end
 ---@field cached_has_processable_contents? boolean
 ---@field next_processable_recheck_tick? uint
 ---@field processable_check_interval_ticks? uint
----@field wake_schedule_tick? uint
+---@field deadline_tick? uint
+---@field dirty_queued? boolean
 ---@field inventory_processing? table
 ---@field has_unmet_signal_requests? boolean
 ---@field parsed_signal_requests? table
@@ -302,6 +303,10 @@ function tracking.rebuild_digitizer_chest_queues()
         active_size = 0,
         idle_size = 0,
         long_idle_size = 0,
+        dirty = {},
+        dirty_size = 0,
+        deadlines = {by_tick = {}, min_tick = nil},
+        full_pass_seconds = {},
     }
     local queues = storage.tracked_entity_queues["digitizer-chest"]
 
@@ -311,8 +316,8 @@ function tracking.rebuild_digitizer_chest_queues()
     storage.request_ids["digitizer-chest-active"] = 1
     storage.request_ids["digitizer-chest-idle"] = 1
     storage.request_ids["digitizer-chest-long_idle"] = 1
+    storage.request_ids["digitizer-chest-dirty"] = 1
     storage.digitizer_chest_queues_ready = true
-    storage.digitizer_chest_wake_schedule = nil
 
     for unit_number, entity_data in pairs(tracked_entities) do
         local entity = entity_data.entity
@@ -326,8 +331,12 @@ function tracking.rebuild_digitizer_chest_queues()
             entity_data.idle_empty_checks = 0
             entity_data.active_until_tick = game.tick + digitizer_chest_active_keepalive_ticks
             entity_data.queue_name = "active"
+            entity_data.dirty_queued = true
+            entity_data.deadline_tick = nil
             queues.active[unit_number] = entity_data
             queues.active_size = queues.active_size + 1
+            queues.dirty[unit_number] = entity_data
+            queues.dirty_size = queues.dirty_size + 1
         end
     end
 end
@@ -1073,77 +1082,69 @@ local function remove_digitizer_queue_entry_from_all(queues, unit_number)
     end
 end
 
-local function ensure_digitizer_chest_wake_schedule_storage()
-    local wake_schedule = storage.digitizer_chest_wake_schedule
-    if wake_schedule then
-        wake_schedule.idle = wake_schedule.idle or {by_tick = {}, min_tick = nil}
-        wake_schedule.long_idle = wake_schedule.long_idle or {by_tick = {}, min_tick = nil}
-        return wake_schedule
+local function add_digitizer_dirty_entry(queues, entity_data)
+    local unit_number = entity_data.unit_number
+    local dirty = queues.dirty
+    if not dirty[unit_number] then
+        queues.dirty_size = (queues.dirty_size or 0) + 1
     end
-    wake_schedule = {
-        idle = {by_tick = {}, min_tick = nil},
-        long_idle = {by_tick = {}, min_tick = nil},
-    }
-    storage.digitizer_chest_wake_schedule = wake_schedule
-    return wake_schedule
+    dirty[unit_number] = entity_data
+    entity_data.dirty_queued = true
 end
 
-local function refresh_digitizer_wake_queue_min_tick(wake_queue)
+local function remove_digitizer_dirty_entry(queues, unit_number)
+    local dirty = queues.dirty
+    local entity_data = dirty[unit_number]
+    if not entity_data then
+        return nil
+    end
+    dirty[unit_number] = nil
+    if (queues.dirty_size or 0) > 0 then
+        queues.dirty_size = queues.dirty_size - 1
+    end
+    entity_data.dirty_queued = nil
+    return entity_data
+end
+
+local function refresh_digitizer_deadline_min_tick(deadlines)
     local min_tick = nil
-    for tick, bucket in pairs(wake_queue.by_tick) do
+    for tick, bucket in pairs(deadlines.by_tick) do
         if bucket and next(bucket) ~= nil and (not min_tick or tick < min_tick) then
             min_tick = tick
         end
     end
-    wake_queue.min_tick = min_tick
+    deadlines.min_tick = min_tick
 end
 
-local function remove_digitizer_wake_queue_entry(entity_data, queue_name)
-    if not entity_data then
+local function remove_digitizer_deadline_entry(queues, entity_data)
+    if not entity_data or not entity_data.deadline_tick then
         return
     end
-    local scheduled_tick = entity_data.wake_schedule_tick
-    if not scheduled_tick then
-        return
-    end
-
-    local wake_schedule = ensure_digitizer_chest_wake_schedule_storage()
-    local removed = false
-    local function remove_from_wake_queue(target_queue_name)
-        local wake_queue = wake_schedule[target_queue_name]
-        local bucket = wake_queue and wake_queue.by_tick[scheduled_tick]
-        if not bucket or not bucket[entity_data.unit_number] then
-            return
-        end
+    local deadlines = queues.deadlines
+    local deadline_tick = entity_data.deadline_tick
+    local bucket = deadlines.by_tick[deadline_tick]
+    if bucket and bucket[entity_data.unit_number] then
         bucket[entity_data.unit_number] = nil
-        removed = true
         if next(bucket) == nil then
-            wake_queue.by_tick[scheduled_tick] = nil
-            if wake_queue.min_tick == scheduled_tick then
-                refresh_digitizer_wake_queue_min_tick(wake_queue)
+            deadlines.by_tick[deadline_tick] = nil
+            if deadlines.min_tick == deadline_tick then
+                refresh_digitizer_deadline_min_tick(deadlines)
             end
         end
     end
-
-    if queue_name == "idle" or queue_name == "long_idle" then
-        remove_from_wake_queue(queue_name)
-    else
-        remove_from_wake_queue("idle")
-        remove_from_wake_queue("long_idle")
-    end
-
-    if removed then
-        entity_data.wake_schedule_tick = nil
-    end
+    entity_data.deadline_tick = nil
 end
 
-local function get_digitizer_entity_wake_tick(entity_data)
+local function get_digitizer_entity_next_dispatch_tick(entity_data)
     if not entity_data then
         return nil
     end
-    local queue_name = entity_data.queue_name
-    if queue_name ~= "idle" and queue_name ~= "long_idle" then
-        return nil
+    local queue_name = entity_data.queue_name or "active"
+    if queue_name == "signal" then
+        return game.tick + digitizer_chest_signal_nth_tick
+    end
+    if queue_name == "active" then
+        return game.tick + digitizer_chest_active_nth_tick
     end
 
     local wake_tick = entity_data.next_signal_check_tick
@@ -1152,38 +1153,28 @@ local function get_digitizer_entity_wake_tick(entity_data)
         wake_tick = processable_tick
     end
     if wake_tick == nil then
-        wake_tick = game.tick
+        if queue_name == "long_idle" then
+            return game.tick + digitizer_chest_long_idle_nth_tick
+        end
+        return game.tick + digitizer_chest_idle_nth_tick
     end
     return wake_tick
 end
 
-local function add_digitizer_wake_queue_entry(entity_data)
-    if not entity_data then
+local function schedule_digitizer_deadline(queues, entity_data, deadline_tick)
+    remove_digitizer_deadline_entry(queues, entity_data)
+    if not deadline_tick then
         return
     end
-    local queue_name = entity_data.queue_name
-    if queue_name ~= "idle" and queue_name ~= "long_idle" then
-        entity_data.wake_schedule_tick = nil
-        return
-    end
-
-    local wake_tick = get_digitizer_entity_wake_tick(entity_data)
-    if wake_tick == nil then
-        entity_data.wake_schedule_tick = nil
-        return
-    end
-
-    local wake_schedule = ensure_digitizer_chest_wake_schedule_storage()
-    local wake_queue = wake_schedule[queue_name]
-    local bucket = wake_queue.by_tick[wake_tick]
+    local bucket = queues.deadlines.by_tick[deadline_tick]
     if not bucket then
         bucket = {}
-        wake_queue.by_tick[wake_tick] = bucket
+        queues.deadlines.by_tick[deadline_tick] = bucket
     end
     bucket[entity_data.unit_number] = true
-    entity_data.wake_schedule_tick = wake_tick
-    if not wake_queue.min_tick or wake_tick < wake_queue.min_tick then
-        wake_queue.min_tick = wake_tick
+    entity_data.deadline_tick = deadline_tick
+    if not queues.deadlines.min_tick or deadline_tick < queues.deadlines.min_tick then
+        queues.deadlines.min_tick = deadline_tick
     end
 end
 
@@ -1191,8 +1182,12 @@ update_digitizer_chest_wake_schedule = function(entity_data)
     if not entity_data then
         return
     end
-    remove_digitizer_wake_queue_entry(entity_data, entity_data.queue_name)
-    add_digitizer_wake_queue_entry(entity_data)
+    local queues = ensure_digitizer_chest_queue_storage()
+    if entity_data.dirty_queued then
+        remove_digitizer_deadline_entry(queues, entity_data)
+        return
+    end
+    schedule_digitizer_deadline(queues, entity_data, get_digitizer_entity_next_dispatch_tick(entity_data))
 end
 
 ensure_digitizer_chest_queue_storage = function()
@@ -1212,6 +1207,9 @@ ensure_digitizer_chest_queue_storage = function()
             active_size = 0,
             idle_size = 0,
             long_idle_size = 0,
+            dirty = {},
+            dirty_size = 0,
+            deadlines = {by_tick = {}, min_tick = nil},
         }
         storage.tracked_entity_queues["digitizer-chest"] = queues
     end
@@ -1224,6 +1222,9 @@ ensure_digitizer_chest_queue_storage = function()
     queues.active_size = queues.active_size or table_size(queues.active)
     queues.idle_size = queues.idle_size or table_size(queues.idle)
     queues.long_idle_size = queues.long_idle_size or table_size(queues.long_idle)
+    queues.dirty = queues.dirty or {}
+    queues.dirty_size = queues.dirty_size or table_size(queues.dirty)
+    queues.deadlines = queues.deadlines or {by_tick = {}, min_tick = nil}
 
     if not storage.request_ids then
         storage.request_ids = {}
@@ -1232,6 +1233,7 @@ ensure_digitizer_chest_queue_storage = function()
     storage.request_ids["digitizer-chest-active"] = storage.request_ids["digitizer-chest-active"] or 1
     storage.request_ids["digitizer-chest-idle"] = storage.request_ids["digitizer-chest-idle"] or 1
     storage.request_ids["digitizer-chest-long_idle"] = storage.request_ids["digitizer-chest-long_idle"] or 1
+    storage.request_ids["digitizer-chest-dirty"] = storage.request_ids["digitizer-chest-dirty"] or 1
 
     local tracked_entities = storage.tracked_entities and storage.tracked_entities["digitizer-chest"]
     local needs_rebuild = not storage.digitizer_chest_queues_ready
@@ -1260,7 +1262,9 @@ ensure_digitizer_chest_queue_storage = function()
     queues.idle_size = 0
     queues.long_idle_size = 0
     queues.full_pass_seconds = {}
-    storage.digitizer_chest_wake_schedule = nil
+    queues.dirty = {}
+    queues.dirty_size = 0
+    queues.deadlines = {by_tick = {}, min_tick = nil}
 
     if tracked_entities then
         for unit_number, entity_data in pairs(tracked_entities) do
@@ -1270,7 +1274,12 @@ ensure_digitizer_chest_queue_storage = function()
                 entity_data.queue_name = queue_name
             end
             add_digitizer_queue_entry(queues, queue_name, unit_number, entity_data)
-            add_digitizer_wake_queue_entry(entity_data)
+            entity_data.deadline_tick = nil
+            if entity_data.dirty_queued then
+                add_digitizer_dirty_entry(queues, entity_data)
+            else
+                update_digitizer_chest_wake_schedule(entity_data)
+            end
         end
     end
 
@@ -1292,7 +1301,6 @@ local function set_digitizer_chest_queue(entity_data, queue_name)
     end
 
     local previous_queue = entity_data.queue_name
-    remove_digitizer_wake_queue_entry(entity_data, previous_queue)
 
     if previous_queue and queues[previous_queue] then
         remove_digitizer_queue_entry(queues, previous_queue, unit_number)
@@ -1307,7 +1315,7 @@ local function set_digitizer_chest_queue(entity_data, queue_name)
         entity_data.next_processable_recheck_tick = 0
         entity_data.processable_check_interval_ticks = digitizer_chest_processable_recheck_ticks
     end
-    add_digitizer_wake_queue_entry(entity_data)
+    update_digitizer_chest_wake_schedule(entity_data)
 end
 
 local function can_use_digitizer_processable_cache(entity_data)
@@ -1341,7 +1349,26 @@ function tracking.invalidate_digitizer_chest_processable_cache(entity_data, wake
     if wake_queue and entity_data.queue_name == "long_idle" then
         set_digitizer_chest_queue(entity_data, "idle")
     end
-    update_digitizer_chest_wake_schedule(entity_data)
+    tracking.mark_digitizer_chest_dirty(entity_data)
+end
+
+function tracking.mark_digitizer_chest_dirty(entity_data)
+    if not entity_data or entity_data.name ~= "digitizer-chest" then return end
+    local queues = ensure_digitizer_chest_queue_storage()
+    remove_digitizer_deadline_entry(queues, entity_data)
+    add_digitizer_dirty_entry(queues, entity_data)
+end
+
+function tracking.remove_digitizer_chest_dispatch(entity_data)
+    if not entity_data or entity_data.name ~= "digitizer-chest" then return end
+    local queues = ensure_digitizer_chest_queue_storage()
+    remove_digitizer_deadline_entry(queues, entity_data)
+    remove_digitizer_dirty_entry(queues, entity_data.unit_number)
+    if entity_data.queue_name and queues[entity_data.queue_name] then
+        remove_digitizer_queue_entry(queues, entity_data.queue_name, entity_data.unit_number)
+    else
+        remove_digitizer_queue_entry_from_all(queues, entity_data.unit_number)
+    end
 end
 
 get_dynamic_digitizer_queue_batch = function(queues, queue_name, base_batch_size)
@@ -1354,81 +1381,6 @@ get_dynamic_digitizer_queue_batch = function(queues, queue_name, base_batch_size
         dynamic_batch_size = base_batch_size
     end
     return dynamic_batch_size
-end
-
-local function process_digitizer_chest_queue(queue_name, iterations, batch_size)
-    local queues = ensure_digitizer_chest_queue_storage()
-    local queue = queues[queue_name]
-    local request_id_key = "digitizer-chest-" .. queue_name
-    local queue_size = get_digitizer_queue_size(queues, queue_name)
-    if queue_size <= 0 then
-        storage.request_ids[request_id_key] = nil
-        return
-    end
-    local dynamic_batch_size = get_dynamic_digitizer_queue_batch(queues, queue_name, batch_size)
-
-    local current_key = storage.request_ids[request_id_key]
-    if current_key and not queue[current_key] then
-        current_key = nil
-    end
-    if not current_key then
-        current_key = next(queue)
-    end
-
-    for _ = 1, iterations do
-        if not current_key then
-            break
-        end
-
-        local processed = 0
-        while current_key and processed < dynamic_batch_size do
-            local key = current_key
-            current_key = next(queue, key)
-            local entity_data = queue[key]
-            if entity_data then
-                tracking.update_entity(entity_data)
-            end
-            processed = processed + 1
-        end
-    end
-
-    storage.request_ids[request_id_key] = current_key
-end
-
-local function process_digitizer_chest_queue_budgeted(queue_name, max_processed)
-    if max_processed <= 0 then
-        return
-    end
-
-    local queues = ensure_digitizer_chest_queue_storage()
-    local queue = queues[queue_name]
-    local request_id_key = "digitizer-chest-" .. queue_name
-    local queue_size = get_digitizer_queue_size(queues, queue_name)
-    if queue_size <= 0 then
-        storage.request_ids[request_id_key] = nil
-        return
-    end
-
-    local current_key = storage.request_ids[request_id_key]
-    if current_key and not queue[current_key] then
-        current_key = nil
-    end
-    if not current_key then
-        current_key = next(queue)
-    end
-
-    local processed = 0
-    while current_key and processed < max_processed do
-        local key = current_key
-        current_key = next(queue, key)
-        local entity_data = queue[key]
-        if entity_data then
-            tracking.update_entity(entity_data)
-        end
-        processed = processed + 1
-    end
-
-    storage.request_ids[request_id_key] = current_key
 end
 
 local function digitizer_chest_has_contents(entity_data)
@@ -1577,260 +1529,6 @@ local function digitizer_chest_has_unmet_signal_requests(entity_data, signals)
     return false
 end
 
-local function wake_digitizer_chest_idle_queue(iterations, batch_size)
-    local queues = ensure_digitizer_chest_queue_storage()
-    local queue = queues.idle
-    local request_id_key = "digitizer-chest-idle-wakeup"
-    if get_digitizer_queue_size(queues, "idle") <= 0 then
-        storage.request_ids[request_id_key] = nil
-        return
-    end
-    local dynamic_batch_size = get_dynamic_digitizer_queue_batch(queues, "idle", batch_size)
-
-    local current_key = storage.request_ids[request_id_key]
-    if current_key and not queue[current_key] then
-        current_key = nil
-    end
-    if not current_key then
-        current_key = next(queue)
-    end
-
-    for _ = 1, iterations do
-        if not current_key then
-            break
-        end
-
-        local processed = 0
-        while current_key and processed < dynamic_batch_size do
-            local key = current_key
-            current_key = next(queue, key)
-            local entity_data = queue[key]
-            if entity_data then
-                local entity = entity_data.entity
-                if not entity or not entity.valid then
-                    tracking.remove_tracked_entity(entity_data)
-                else
-                    local signals, signals_checked = refresh_digitizer_chest_signals(entity_data)
-                    if signals and entity_data.signal_active then
-                        if entity_data.signals_changed or signals_checked then
-                            entity_data.has_unmet_signal_requests = digitizer_chest_has_unmet_signal_requests(entity_data, signals)
-                        end
-                        if entity_data.has_unmet_signal_requests then
-                            entity_data.idle_empty_checks = 0
-                            set_digitizer_chest_queue(entity_data, "active")
-                        end
-                    elseif digitizer_chest_has_processable_contents(entity_data) then
-                        entity_data.idle_empty_checks = 0
-                        set_digitizer_chest_queue(entity_data, "active")
-                    end
-                end
-            end
-            processed = processed + 1
-        end
-    end
-
-    storage.request_ids[request_id_key] = current_key
-end
-
-local function pop_next_due_digitizer_wake_unit(queue_name)
-    local wake_schedule = ensure_digitizer_chest_wake_schedule_storage()
-    local wake_queue = wake_schedule[queue_name]
-    local current_tick = wake_queue.min_tick
-    while current_tick and current_tick <= game.tick do
-        local bucket = wake_queue.by_tick[current_tick]
-        local unit_number = bucket and next(bucket)
-        if unit_number then
-            bucket[unit_number] = nil
-            if next(bucket) == nil then
-                wake_queue.by_tick[current_tick] = nil
-                refresh_digitizer_wake_queue_min_tick(wake_queue)
-            end
-            return current_tick, unit_number
-        end
-        wake_queue.by_tick[current_tick] = nil
-        refresh_digitizer_wake_queue_min_tick(wake_queue)
-        current_tick = wake_queue.min_tick
-    end
-    return nil, nil
-end
-
-local function wake_digitizer_chest_idle_entity(entity_data)
-    local entity = entity_data.entity
-    if not entity or not entity.valid then
-        tracking.remove_tracked_entity(entity_data)
-        return
-    end
-
-    local signals, signals_checked = refresh_digitizer_chest_signals(entity_data)
-    if signals and entity_data.signal_active then
-        if entity_data.signals_changed or signals_checked then
-            entity_data.has_unmet_signal_requests = digitizer_chest_has_unmet_signal_requests(entity_data, signals)
-        end
-        if entity_data.has_unmet_signal_requests then
-            entity_data.idle_empty_checks = 0
-            set_digitizer_chest_queue(entity_data, "active")
-        end
-    elseif digitizer_chest_has_processable_contents(entity_data) then
-        entity_data.idle_empty_checks = 0
-        set_digitizer_chest_queue(entity_data, "active")
-    end
-end
-
-local function wake_digitizer_chest_idle_queue_budgeted(max_processed)
-    if max_processed <= 0 then
-        return
-    end
-
-    local queues = ensure_digitizer_chest_queue_storage()
-    local queue = queues.idle
-    if get_digitizer_queue_size(queues, "idle") <= 0 then
-        return
-    end
-
-    local processed = 0
-    while processed < max_processed do
-        local due_tick, unit_number = pop_next_due_digitizer_wake_unit("idle")
-        if not due_tick then
-            break
-        end
-        local entity_data = queue[unit_number]
-        if entity_data and entity_data.queue_name == "idle" and entity_data.wake_schedule_tick == due_tick then
-            entity_data.wake_schedule_tick = nil
-            wake_digitizer_chest_idle_entity(entity_data)
-            if entity_data.queue_name == "idle" and entity_data.wake_schedule_tick == nil then
-                add_digitizer_wake_queue_entry(entity_data)
-            end
-        end
-        processed = processed + 1
-    end
-end
-
-local function wake_digitizer_chest_long_idle_queue(iterations, batch_size)
-    local queues = ensure_digitizer_chest_queue_storage()
-    local queue = queues.long_idle
-    local request_id_key = "digitizer-chest-long-idle-wakeup"
-    if get_digitizer_queue_size(queues, "long_idle") <= 0 then
-        storage.request_ids[request_id_key] = nil
-        return
-    end
-    local dynamic_batch_size = get_dynamic_digitizer_queue_batch(queues, "long_idle", batch_size)
-
-    local current_key = storage.request_ids[request_id_key]
-    if current_key and not queue[current_key] then
-        current_key = nil
-    end
-    if not current_key then
-        current_key = next(queue)
-    end
-
-    for _ = 1, iterations do
-        if not current_key then
-            break
-        end
-
-        local processed = 0
-        while current_key and processed < dynamic_batch_size do
-            local key = current_key
-            current_key = next(queue, key)
-            local entity_data = queue[key]
-            if entity_data then
-                local entity = entity_data.entity
-                if not entity or not entity.valid then
-                    tracking.remove_tracked_entity(entity_data)
-                else
-                    local signals, signals_checked = refresh_digitizer_chest_signals(entity_data)
-                    if signals and entity_data.signal_active then
-                        if entity_data.signals_changed or signals_checked then
-                            entity_data.has_unmet_signal_requests = digitizer_chest_has_unmet_signal_requests(entity_data, signals)
-                        end
-                        if entity_data.has_unmet_signal_requests then
-                            entity_data.idle_empty_checks = 0
-                            set_digitizer_chest_queue(entity_data, "active")
-                        elseif digitizer_chest_has_contents(entity_data) then
-                            entity_data.idle_empty_checks = 0
-                            set_digitizer_chest_queue(entity_data, "idle")
-                        elseif game.tick >= (entity_data.next_signal_check_tick or 0) then
-                            set_digitizer_chest_queue(entity_data, "idle")
-                        end
-                    elseif digitizer_chest_has_processable_contents(entity_data) then
-                        entity_data.idle_empty_checks = 0
-                        set_digitizer_chest_queue(entity_data, "active")
-                    elseif digitizer_chest_has_contents(entity_data) then
-                        entity_data.idle_empty_checks = 0
-                        set_digitizer_chest_queue(entity_data, "idle")
-                    elseif game.tick >= (entity_data.next_signal_check_tick or 0) then
-                        set_digitizer_chest_queue(entity_data, "idle")
-                    end
-                end
-            end
-            processed = processed + 1
-        end
-    end
-
-    storage.request_ids[request_id_key] = current_key
-end
-
-local function wake_digitizer_chest_long_idle_entity(entity_data)
-    local entity = entity_data.entity
-    if not entity or not entity.valid then
-        tracking.remove_tracked_entity(entity_data)
-        return
-    end
-
-    local signals, signals_checked = refresh_digitizer_chest_signals(entity_data)
-    if signals and entity_data.signal_active then
-        if entity_data.signals_changed or signals_checked then
-            entity_data.has_unmet_signal_requests = digitizer_chest_has_unmet_signal_requests(entity_data, signals)
-        end
-        if entity_data.has_unmet_signal_requests then
-            entity_data.idle_empty_checks = 0
-            set_digitizer_chest_queue(entity_data, "active")
-        elseif digitizer_chest_has_contents(entity_data) then
-            entity_data.idle_empty_checks = 0
-            set_digitizer_chest_queue(entity_data, "idle")
-        elseif game.tick >= (entity_data.next_signal_check_tick or 0) then
-            set_digitizer_chest_queue(entity_data, "idle")
-        end
-    elseif digitizer_chest_has_processable_contents(entity_data) then
-        entity_data.idle_empty_checks = 0
-        set_digitizer_chest_queue(entity_data, "active")
-    elseif digitizer_chest_has_contents(entity_data) then
-        entity_data.idle_empty_checks = 0
-        set_digitizer_chest_queue(entity_data, "idle")
-    elseif game.tick >= (entity_data.next_signal_check_tick or 0) then
-        set_digitizer_chest_queue(entity_data, "idle")
-    end
-end
-
-local function wake_digitizer_chest_long_idle_queue_budgeted(max_processed)
-    if max_processed <= 0 then
-        return
-    end
-
-    local queues = ensure_digitizer_chest_queue_storage()
-    local queue = queues.long_idle
-    if get_digitizer_queue_size(queues, "long_idle") <= 0 then
-        return
-    end
-
-    local processed = 0
-    while processed < max_processed do
-        local due_tick, unit_number = pop_next_due_digitizer_wake_unit("long_idle")
-        if not due_tick then
-            break
-        end
-        local entity_data = queue[unit_number]
-        if entity_data and entity_data.queue_name == "long_idle" and entity_data.wake_schedule_tick == due_tick then
-            entity_data.wake_schedule_tick = nil
-            wake_digitizer_chest_long_idle_entity(entity_data)
-            if entity_data.queue_name == "long_idle" and entity_data.wake_schedule_tick == nil then
-                add_digitizer_wake_queue_entry(entity_data)
-            end
-        end
-        processed = processed + 1
-    end
-end
-
 local function get_digitizer_queue_tick_budgets()
     storage.digitizer_queue_tick_budgets = storage.digitizer_queue_tick_budgets or {}
     return storage.digitizer_queue_tick_budgets
@@ -1850,26 +1548,113 @@ local function get_budgeted_digitizer_queue_work(queues, budget_key, queue_name,
     return work
 end
 
+local function pop_next_due_digitizer_deadline(queues)
+    local deadlines = queues.deadlines
+    local current_tick = deadlines.min_tick
+    while current_tick and current_tick <= game.tick do
+        local bucket = deadlines.by_tick[current_tick]
+        local unit_number = bucket and next(bucket)
+        if unit_number then
+            bucket[unit_number] = nil
+            if next(bucket) == nil then
+                deadlines.by_tick[current_tick] = nil
+                refresh_digitizer_deadline_min_tick(deadlines)
+            end
+            return current_tick, unit_number
+        end
+        deadlines.by_tick[current_tick] = nil
+        refresh_digitizer_deadline_min_tick(deadlines)
+        current_tick = deadlines.min_tick
+    end
+    return nil, nil
+end
+
+local function collect_due_digitizer_deadlines_budgeted(max_processed)
+    if max_processed <= 0 then
+        return
+    end
+
+    local queues = ensure_digitizer_chest_queue_storage()
+    local tracked_entities = storage.tracked_entities and storage.tracked_entities["digitizer-chest"]
+    if not tracked_entities then
+        return
+    end
+
+    local processed = 0
+    while processed < max_processed do
+        local due_tick, unit_number = pop_next_due_digitizer_deadline(queues)
+        if not due_tick then
+            break
+        end
+        local entity_data = tracked_entities[unit_number]
+        if entity_data and entity_data.deadline_tick == due_tick then
+            entity_data.deadline_tick = nil
+            add_digitizer_dirty_entry(queues, entity_data)
+        end
+        processed = processed + 1
+    end
+end
+
+local function process_dirty_digitizer_chests_budgeted(max_processed)
+    if max_processed <= 0 then
+        return
+    end
+
+    local queues = ensure_digitizer_chest_queue_storage()
+    local dirty = queues.dirty
+    local request_id_key = "digitizer-chest-dirty"
+    if (queues.dirty_size or 0) <= 0 then
+        storage.request_ids[request_id_key] = nil
+        return
+    end
+
+    local current_key = storage.request_ids[request_id_key]
+    if current_key and not dirty[current_key] then
+        current_key = nil
+    end
+    if not current_key then
+        current_key = next(dirty)
+    end
+
+    local processed = 0
+    while current_key and processed < max_processed do
+        local key = current_key
+        current_key = next(dirty, key)
+        local entity_data = remove_digitizer_dirty_entry(queues, key)
+        if entity_data then
+            local entity = entity_data.entity
+            if not entity or not entity.valid then
+                tracking.remove_tracked_entity(entity_data)
+            else
+                tracking.update_entity(entity_data)
+                if not entity_data.dirty_queued then
+                    update_digitizer_chest_wake_schedule(entity_data)
+                end
+            end
+        end
+        processed = processed + 1
+    end
+
+    storage.request_ids[request_id_key] = current_key
+end
+
 function tracking.on_tick_update_digitizer_queues()
     local queues = ensure_digitizer_chest_queue_storage()
 
-    wake_digitizer_chest_idle_queue_budgeted(get_budgeted_digitizer_queue_work(
-        queues, "idle_wakeup", "idle", digitizer_chest_active_nth_tick, 4))
+    local deadline_budget
+        = get_budgeted_digitizer_queue_work(queues, "signal_deadline", "signal", digitizer_chest_signal_nth_tick, 4)
+        + get_budgeted_digitizer_queue_work(queues, "active_deadline", "active", digitizer_chest_active_nth_tick, 4)
+        + get_budgeted_digitizer_queue_work(queues, "idle_deadline", "idle", digitizer_chest_idle_nth_tick, 2)
+        + get_budgeted_digitizer_queue_work(queues, "long_idle_deadline", "long_idle", digitizer_chest_long_idle_nth_tick, 1)
 
-    wake_digitizer_chest_long_idle_queue_budgeted(get_budgeted_digitizer_queue_work(
-        queues, "long_idle_wakeup", "long_idle", digitizer_chest_idle_nth_tick, 4))
+    local dirty_budget
+        = get_budgeted_digitizer_queue_work(queues, "signal_dirty", "signal", digitizer_chest_signal_nth_tick, 4)
+        + get_budgeted_digitizer_queue_work(queues, "active_dirty", "active", digitizer_chest_active_nth_tick, 4)
+        + get_budgeted_digitizer_queue_work(queues, "idle_dirty", "idle", digitizer_chest_idle_nth_tick, 2)
+        + get_budgeted_digitizer_queue_work(queues, "long_idle_dirty", "long_idle", digitizer_chest_long_idle_nth_tick, 1)
 
-    process_digitizer_chest_queue_budgeted("signal", get_budgeted_digitizer_queue_work(
-        queues, "signal", "signal", digitizer_chest_signal_nth_tick, 4))
-
-    process_digitizer_chest_queue_budgeted("active", get_budgeted_digitizer_queue_work(
-        queues, "active", "active", digitizer_chest_active_nth_tick, 4))
-
-    process_digitizer_chest_queue_budgeted("idle", get_budgeted_digitizer_queue_work(
-        queues, "idle", "idle", digitizer_chest_idle_nth_tick, 2))
-
-    process_digitizer_chest_queue_budgeted("long_idle", get_budgeted_digitizer_queue_work(
-        queues, "long_idle", "long_idle", digitizer_chest_long_idle_nth_tick, 1))
+    collect_due_digitizer_deadlines_budgeted(deadline_budget)
+    process_dirty_digitizer_chests_budgeted(math.max(dirty_budget, deadline_budget, 1))
 end
 local tracking_context = {
     tracking = tracking,
@@ -1882,9 +1667,6 @@ local tracking_context = {
     digitizer_chest_idle_to_long_idle_checks = digitizer_chest_idle_to_long_idle_checks,
     get_tracking_entity_name = get_tracking_entity_name,
     sync_digitizer_chest_fluid_setting = sync_digitizer_chest_fluid_setting,
-    ensure_digitizer_chest_queue_storage = ensure_digitizer_chest_queue_storage,
-    remove_digitizer_queue_entry = remove_digitizer_queue_entry,
-    remove_digitizer_queue_entry_from_all = remove_digitizer_queue_entry_from_all,
     set_digitizer_chest_queue = set_digitizer_chest_queue,
     get_digitizer_update_temp_data = get_digitizer_update_temp_data,
     refresh_digitizer_chest_signals = refresh_digitizer_chest_signals,

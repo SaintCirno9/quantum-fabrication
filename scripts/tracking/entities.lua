@@ -4,9 +4,6 @@ return function(context)
     local flib_table = context.flib_table
     local get_tracking_entity_name = context.get_tracking_entity_name
     local sync_digitizer_chest_fluid_setting = context.sync_digitizer_chest_fluid_setting
-    local ensure_digitizer_chest_queue_storage = context.ensure_digitizer_chest_queue_storage
-    local remove_digitizer_queue_entry = context.remove_digitizer_queue_entry
-    local remove_digitizer_queue_entry_from_all = context.remove_digitizer_queue_entry_from_all
     local set_digitizer_chest_queue = context.set_digitizer_chest_queue
     local digitizer_chest_signal_recheck_ticks = context.digitizer_chest_signal_recheck_ticks
     local digitizer_chest_active_keepalive_ticks = context.digitizer_chest_active_keepalive_ticks
@@ -99,6 +96,7 @@ return function(context)
         storage.tracked_entities[tracked_entity_name][entity.unit_number] = entity_data
         if tracked_entity_name == "digitizer-chest" then
             set_digitizer_chest_queue(entity_data, "active")
+            tracking.mark_digitizer_chest_dirty(entity_data)
         end
     end
 
@@ -106,12 +104,7 @@ return function(context)
         if not entity_data then return end
         local entity_name = entity_data.name
         if entity_name == "digitizer-chest" then
-            local queues = ensure_digitizer_chest_queue_storage()
-            if entity_data.queue_name and queues[entity_data.queue_name] then
-                remove_digitizer_queue_entry(queues, entity_data.queue_name, entity_data.unit_number)
-            else
-                remove_digitizer_queue_entry_from_all(queues, entity_data.unit_number)
-            end
+            tracking.remove_digitizer_chest_dispatch(entity_data)
             if entity_data.container_fluid and entity_data.container_fluid.valid then
                 entity_data.container_fluid.destroy()
             end

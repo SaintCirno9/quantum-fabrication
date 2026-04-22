@@ -150,7 +150,7 @@ function handlers.on_player_fast_transferred(event)
     if not entity_data then return end
 
     tracking.invalidate_digitizer_chest_processable_cache(entity_data, true)
-    tracking.update_entity(entity_data)
+    tracking.mark_digitizer_chest_dirty(entity_data)
 end
 
 return handlers
