@@ -2,6 +2,7 @@ local utils = require("scripts/utils")
 local qf_utils = require("scripts/qf_utils")
 local qs_utils = require("scripts/qs_utils")
 local flib_dictionary = require("__flib__.dictionary")
+local tracking = require("scripts/tracking_utils")
 
 ---@class gui_utils
 local gui_utils = {}
@@ -231,6 +232,7 @@ function gui_utils.set_intake_limit(text, unit_number)
     local number = tonumber(text)
     if not number then number = 0 end
     entity_data.settings.intake_limit = number
+    tracking.invalidate_digitizer_chest_processable_cache(entity_data, true)
 end
 
 ---@param text string
@@ -242,6 +244,7 @@ function gui_utils.set_reserve_limit(text, unit_number)
     if not number then number = 0 end
     -- 保留负值输入，当前玩法会利用它在无信号入仓路径里放大入仓量
     entity_data.settings.reserve_limit = number
+    tracking.invalidate_digitizer_chest_processable_cache(entity_data, true)
 end
 
 return gui_utils

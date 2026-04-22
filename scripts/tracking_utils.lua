@@ -50,8 +50,18 @@ local digitizer_chest_idle_nth_tick = settings.startup["qf-digitizer-idle-nth-ti
 local digitizer_chest_long_idle_nth_tick = get_next_prime_tick(math.max(digitizer_chest_idle_nth_tick * 5, 60))
 local digitizer_chest_idle_to_long_idle_checks = 3
 local digitizer_chest_active_keepalive_ticks = math.max(digitizer_chest_active_nth_tick * 4, 60)
+local digitizer_chest_processable_recheck_ticks = digitizer_chest_active_nth_tick
+local digitizer_chest_processable_recheck_max_ticks = digitizer_chest_idle_nth_tick
 local digitizer_queue_dynamic_batch_divisor = 6
 local digitizer_queue_full_pass_seconds_cache_version = 4
+local digitizer_queue_max_work_per_tick = {
+    signal = 8,
+    active = 16,
+}
+local digitizer_queue_budget_max_work_per_tick = {
+    idle_wakeup = 2,
+    long_idle_wakeup = 1,
+}
 
 local Digitizer_chest_entities = {
     ["digitizer-chest"] = true,
@@ -115,6 +125,9 @@ end
 ---@field queue_name? "signal"|"active"|"idle"|"long_idle"
 ---@field idle_empty_checks? uint
 ---@field active_until_tick? uint
+---@field cached_has_processable_contents? boolean
+---@field next_processable_recheck_tick? uint
+---@field processable_check_interval_ticks? uint
 ---@field inventory_processing? table
 ---@field has_unmet_signal_requests? boolean
 ---@field parsed_signal_requests? table
@@ -251,6 +264,7 @@ function tracking.set_digitizer_chest_fluid_enabled(entity_data, enabled)
     if not entity_data then return end
     entity_data.settings.fluid_enabled = enabled == true
     sync_digitizer_chest_fluid_setting(entity_data)
+    tracking.invalidate_digitizer_chest_processable_cache(entity_data, true)
 end
 
 ---@param request_data RequestData
@@ -381,13 +395,17 @@ function tracking.dump_digitizer_chest_queues(max_entries, player_index)
                 dynamic_batch_size = runtime.base_batch_size
             end
         end
-        local per_run = runtime.iterations * dynamic_batch_size
+        local work_per_tick = runtime.iterations * dynamic_batch_size / runtime.nth_tick
+        local max_work_per_tick = digitizer_queue_max_work_per_tick[queue_name]
+        if max_work_per_tick and work_per_tick > max_work_per_tick then
+            work_per_tick = max_work_per_tick
+        end
         local runs_needed = 0
         local estimated_ticks = 0
         local estimated_seconds = 0
-        if #entries > 0 and per_run > 0 then
-            runs_needed = math.ceil(#entries / per_run)
-            estimated_ticks = runs_needed * runtime.nth_tick
+        if #entries > 0 and work_per_tick > 0 then
+            estimated_ticks = math.ceil(#entries / work_per_tick)
+            runs_needed = math.ceil(estimated_ticks / runtime.nth_tick)
             estimated_seconds = estimated_ticks / 60
         end
         output("[QF][QueueDump] Queue "
@@ -396,6 +414,7 @@ function tracking.dump_digitizer_chest_queues(max_entries, player_index)
             .. " nth_tick=" .. runtime.nth_tick
             .. " base_batch=" .. runtime.base_batch_size
             .. " dynamic_batch=" .. dynamic_batch_size
+            .. " work_per_tick=" .. string.format("%.2f", work_per_tick)
             .. " runs=" .. runs_needed
             .. " full_pass_ticks=" .. estimated_ticks
             .. " full_pass_seconds=" .. string.format("%.2f", estimated_seconds))
@@ -958,6 +977,30 @@ local function get_digitizer_queue_size(queues, queue_name)
     return queues[get_digitizer_queue_size_key(queue_name)] or 0
 end
 
+local get_dynamic_digitizer_queue_batch
+
+local function get_digitizer_queue_effective_work_per_tick(queues, queue_name, nth_tick, base_batch_size)
+    local queue_size = get_digitizer_queue_size(queues, queue_name)
+    if queue_size <= 0 then
+        return 0
+    end
+    local work_per_tick = get_dynamic_digitizer_queue_batch(queues, queue_name, base_batch_size) / nth_tick
+    local max_work_per_tick = digitizer_queue_max_work_per_tick[queue_name]
+    if max_work_per_tick and work_per_tick > max_work_per_tick then
+        work_per_tick = max_work_per_tick
+    end
+    return work_per_tick
+end
+
+local function get_digitizer_budget_effective_work_per_tick(queues, budget_key, queue_name, nth_tick, base_batch_size)
+    local work_per_tick = get_digitizer_queue_effective_work_per_tick(queues, queue_name, nth_tick, base_batch_size)
+    local max_work_per_tick = digitizer_queue_budget_max_work_per_tick[budget_key]
+    if max_work_per_tick and work_per_tick > max_work_per_tick then
+        work_per_tick = max_work_per_tick
+    end
+    return work_per_tick
+end
+
 local function get_digitizer_queue_full_pass_seconds(queues, queue_name)
     local full_pass_seconds = queues.full_pass_seconds
     if not full_pass_seconds then
@@ -981,17 +1024,10 @@ local function update_digitizer_queue_full_pass_seconds(queues, queue_name)
         base_batch_size = 1
     end
 
-    local dynamic_batch_size = base_batch_size
-    if queue_size > base_batch_size then
-        dynamic_batch_size = math.ceil(queue_size / digitizer_queue_dynamic_batch_divisor)
-        if dynamic_batch_size < base_batch_size then
-            dynamic_batch_size = base_batch_size
-        end
-    end
-
     local full_pass_seconds = 0
-    if queue_size > 0 and dynamic_batch_size > 0 then
-        full_pass_seconds = math.ceil(queue_size / dynamic_batch_size) * nth_tick / 60
+    local work_per_tick = get_digitizer_queue_effective_work_per_tick(queues, queue_name, nth_tick, base_batch_size)
+    if queue_size > 0 and work_per_tick > 0 then
+        full_pass_seconds = math.ceil(queue_size / work_per_tick) / 60
     end
 
     queues.full_pass_seconds = queues.full_pass_seconds or {}
@@ -1147,9 +1183,46 @@ local function set_digitizer_chest_queue(entity_data, queue_name)
 
     add_digitizer_queue_entry(queues, queue_name, unit_number, entity_data)
     entity_data.queue_name = queue_name
+    if queue_name == "active" and entity_data.name == "digitizer-chest" then
+        entity_data.cached_has_processable_contents = nil
+        entity_data.next_processable_recheck_tick = 0
+        entity_data.processable_check_interval_ticks = digitizer_chest_processable_recheck_ticks
+    end
 end
 
-local function get_dynamic_digitizer_queue_batch(queues, queue_name, base_batch_size)
+local function can_use_digitizer_processable_cache(entity_data)
+    local queue_name = entity_data and entity_data.queue_name
+    return queue_name == "idle" or queue_name == "long_idle"
+end
+
+local function cache_digitizer_processable_contents(entity_data, has_processable_contents)
+    if not entity_data or entity_data.name ~= "digitizer-chest" then return end
+    local current_interval = entity_data.processable_check_interval_ticks or digitizer_chest_processable_recheck_ticks
+    entity_data.cached_has_processable_contents = has_processable_contents == true
+    entity_data.next_processable_recheck_tick = game.tick + current_interval
+    if has_processable_contents then
+        entity_data.processable_check_interval_ticks = digitizer_chest_processable_recheck_ticks
+    else
+        entity_data.processable_check_interval_ticks = math.min(
+            digitizer_chest_processable_recheck_max_ticks,
+            math.max(digitizer_chest_processable_recheck_ticks, current_interval * 2)
+        )
+    end
+end
+
+---@param entity_data EntityData?
+---@param wake_queue? boolean
+function tracking.invalidate_digitizer_chest_processable_cache(entity_data, wake_queue)
+    if not entity_data or entity_data.name ~= "digitizer-chest" then return end
+    entity_data.cached_has_processable_contents = nil
+    entity_data.next_processable_recheck_tick = 0
+    entity_data.processable_check_interval_ticks = digitizer_chest_processable_recheck_ticks
+    if wake_queue and entity_data.queue_name == "long_idle" then
+        set_digitizer_chest_queue(entity_data, "idle")
+    end
+end
+
+get_dynamic_digitizer_queue_batch = function(queues, queue_name, base_batch_size)
     local queue_size = get_digitizer_queue_size(queues, queue_name)
     if queue_size <= base_batch_size then
         return base_batch_size
@@ -1251,44 +1324,53 @@ end
 
 local function digitizer_chest_has_processable_contents(entity_data)
     local profiler = begin_instrument_sample()
-    if not digitizer_chest_has_contents(entity_data) then
-        end_instrument_sample(profiler, "tracking.digitizer_chest_has_processable_contents")
-        return false
-    end
-
-    local limit_value = entity_data.settings.intake_limit or 0
-    if limit_value == 0 then
-        end_instrument_sample(profiler, "tracking.digitizer_chest_has_processable_contents")
-        return true
-    end
-
-    local storage_surface = storage.fabricator_inventory[entity_data.surface_index]
-    local storage_items = storage_surface.item
-    local storage_fluids = storage_surface.fluid
-
-    if entity_data.inventory and not entity_data.inventory.is_empty() then
-        for _, item in pairs(entity_data.inventory.get_contents()) do
-            if digitizer_intake_limit_remaining_capacity(item.name, item.quality, entity_data.surface_index, storage_items, limit_value, entity_data.settings.decraft) > 0 then
-                end_instrument_sample(profiler, "tracking.digitizer_chest_has_processable_contents")
-                return true
-            end
+    if can_use_digitizer_processable_cache(entity_data) then
+        local next_recheck_tick = entity_data.next_processable_recheck_tick or 0
+        if entity_data.cached_has_processable_contents ~= nil and game.tick < next_recheck_tick then
+            end_instrument_sample(profiler, "tracking.digitizer_chest_has_processable_contents")
+            return entity_data.cached_has_processable_contents
         end
     end
 
-    if entity_data.container_fluid then
-        local fluid_contents = entity_data.container_fluid.get_fluid_contents()
-        if fluid_contents then
-            for name, _ in pairs(fluid_contents) do
-                if storage_fluids[name][QS_DEFAULT_QUALITY] < limit_value then
-                    end_instrument_sample(profiler, "tracking.digitizer_chest_has_processable_contents")
-                    return true
+    local has_processable_contents = false
+    if digitizer_chest_has_contents(entity_data) then
+        local limit_value = entity_data.settings.intake_limit or 0
+        if limit_value == 0 then
+            has_processable_contents = true
+        else
+            local storage_surface = storage.fabricator_inventory[entity_data.surface_index]
+            local storage_items = storage_surface.item
+            local storage_fluids = storage_surface.fluid
+
+            if entity_data.inventory and not entity_data.inventory.is_empty() then
+                for _, item in pairs(entity_data.inventory.get_contents()) do
+                    if digitizer_intake_limit_remaining_capacity(item.name, item.quality, entity_data.surface_index, storage_items, limit_value, entity_data.settings.decraft) > 0 then
+                        has_processable_contents = true
+                        break
+                    end
+                end
+            end
+
+            if not has_processable_contents and entity_data.container_fluid then
+                local fluid_contents = entity_data.container_fluid.get_fluid_contents()
+                if fluid_contents then
+                    for name, _ in pairs(fluid_contents) do
+                        if storage_fluids[name][QS_DEFAULT_QUALITY] < limit_value then
+                            has_processable_contents = true
+                            break
+                        end
+                    end
                 end
             end
         end
     end
 
+    if can_use_digitizer_processable_cache(entity_data) then
+        cache_digitizer_processable_contents(entity_data, has_processable_contents)
+    end
+
     end_instrument_sample(profiler, "tracking.digitizer_chest_has_processable_contents")
-    return false
+    return has_processable_contents
 end
 
 local function digitizer_chest_has_unmet_signal_requests(entity_data, signals)
@@ -1630,7 +1712,7 @@ local function get_budgeted_digitizer_queue_work(queues, budget_key, queue_name,
         return 0
     end
 
-    local budget = (budgets[budget_key] or 0) + get_dynamic_digitizer_queue_batch(queues, queue_name, base_batch_size) / nth_tick
+    local budget = (budgets[budget_key] or 0) + get_digitizer_budget_effective_work_per_tick(queues, budget_key, queue_name, nth_tick, base_batch_size)
     local work = math.floor(budget)
     budgets[budget_key] = budget - work
     return work
@@ -1653,15 +1735,19 @@ function tracking.on_tick_update_digitizer_queues()
 
     wake_digitizer_chest_idle_queue_budgeted(get_budgeted_digitizer_queue_work(
         queues, "idle_wakeup", "idle", digitizer_chest_active_nth_tick, 4))
+
     wake_digitizer_chest_long_idle_queue_budgeted(get_budgeted_digitizer_queue_work(
         queues, "long_idle_wakeup", "long_idle", digitizer_chest_idle_nth_tick, 4))
 
     process_digitizer_chest_queue_budgeted("signal", get_budgeted_digitizer_queue_work(
         queues, "signal", "signal", digitizer_chest_signal_nth_tick, 4))
+
     process_digitizer_chest_queue_budgeted("active", get_budgeted_digitizer_queue_work(
         queues, "active", "active", digitizer_chest_active_nth_tick, 4))
+
     process_digitizer_chest_queue_budgeted("idle", get_budgeted_digitizer_queue_work(
         queues, "idle", "idle", digitizer_chest_idle_nth_tick, 2))
+
     process_digitizer_chest_queue_budgeted("long_idle", get_budgeted_digitizer_queue_work(
         queues, "long_idle", "long_idle", digitizer_chest_long_idle_nth_tick, 1))
 end
@@ -1922,6 +2008,9 @@ function tracking.add_tracked_entity(request_data)
         entity_data.signal_check_interval_ticks = digitizer_chest_signal_recheck_ticks
         entity_data.idle_empty_checks = 0
         entity_data.active_until_tick = game.tick + digitizer_chest_active_keepalive_ticks
+        entity_data.cached_has_processable_contents = nil
+        entity_data.next_processable_recheck_tick = 0
+        entity_data.processable_check_interval_ticks = digitizer_chest_processable_recheck_ticks
         entity_data.inventory_processing = {
             items = {},
             fluids = {
@@ -2034,6 +2123,7 @@ function tracking.clone_settings(source, destination)
     end
     if not destination_data then return end
     destination_data.settings = flib_table.deep_copy(source_data.settings)
+    tracking.invalidate_digitizer_chest_processable_cache(destination_data, true)
 end
 
 ---@param entity LuaEntity
@@ -2055,6 +2145,7 @@ function tracking.apply_blueprint_settings(entity, blueprint_settings)
     end
     if not entity_data then return end
     entity_data.settings = flib_table.deep_copy(blueprint_settings)
+    tracking.invalidate_digitizer_chest_processable_cache(entity_data, true)
 end
 
 ---@param entity_data EntityData

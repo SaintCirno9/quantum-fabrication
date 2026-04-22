@@ -63,6 +63,32 @@ local function apply_recent_cloneable_settings(entity)
     tracking.apply_blueprint_settings(entity, cached.settings)
 end
 
+local function apply_blueprint_entity_settings_to_stack(blueprint_stack, mapping)
+    if not mapping or not blueprint_stack or not blueprint_stack.valid_for_read then return end
+
+    for entity_number, entity in pairs(mapping) do
+        if entity and entity.valid and Trackable_entities[entity.name] then
+            local blueprint_settings = tracking.export_blueprint_settings(entity)
+            if blueprint_settings then
+                blueprint_stack.set_blueprint_entity_tag(entity_number, "qf_entity_settings", blueprint_settings)
+            end
+        end
+    end
+end
+
+local function apply_blueprint_entity_settings_to_record(blueprint_record, mapping)
+    if not mapping or not blueprint_record or not blueprint_record.valid or not blueprint_record.valid_for_write then return end
+
+    for entity_number, entity in pairs(mapping) do
+        if entity and entity.valid and Trackable_entities[entity.name] then
+            local blueprint_settings = tracking.export_blueprint_settings(entity)
+            if blueprint_settings then
+                blueprint_record.set_blueprint_entity_tag(entity_number, "qf_entity_settings", blueprint_settings)
+            end
+        end
+    end
+end
+
 local function bar_changed(source, destination)
     if source.type ~= "container" and source.type ~= "logistic-container" then return false end
 
@@ -556,17 +582,10 @@ end
 
 function on_player_setup_blueprint(event)
     local mapping = event.mapping and event.mapping.get()
-    local blueprint = event.stack
-    if not mapping or not blueprint or not blueprint.valid_for_read then return end
+    if not mapping then return end
 
-    for entity_number, entity in pairs(mapping) do
-        if entity and entity.valid and Trackable_entities[entity.name] then
-            local blueprint_settings = tracking.export_blueprint_settings(entity)
-            if blueprint_settings then
-                blueprint.set_blueprint_entity_tag(entity_number, "qf_entity_settings", blueprint_settings)
-            end
-        end
-    end
+    apply_blueprint_entity_settings_to_stack(event.stack, mapping)
+    apply_blueprint_entity_settings_to_record(event.record, mapping)
 end
 
 function on_space_platform_built_entity(event)
@@ -727,6 +746,7 @@ function on_player_fast_transferred(event)
     end
     if not entity_data then return end
 
+    tracking.invalidate_digitizer_chest_processable_cache(entity_data, true)
     tracking.update_entity(entity_data)
 end
 

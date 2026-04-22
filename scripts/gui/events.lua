@@ -141,6 +141,7 @@ function on_gui_click(event)
         end
     elseif element.name == "qf_decraft_button" then
         storage.tracked_entities["digitizer-chest"][element_tags.unit_number].settings.decraft = not storage.tracked_entities["digitizer-chest"][element_tags.unit_number].settings.decraft
+        tracking.invalidate_digitizer_chest_processable_cache(storage.tracked_entities["digitizer-chest"][element_tags.unit_number], true)
     end
 end
 
