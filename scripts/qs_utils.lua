@@ -386,7 +386,10 @@ end
 ---@return uint
 ---@return uint
 function qs_utils.count_in_storage(qs_item, player_inventory, player_surface_index)
-    local in_storage = storage.fabricator_inventory[qs_item.surface_index][qs_item.type][qs_item.name][qs_item.quality]
+    local surface_storage = storage.fabricator_inventory[qs_item.surface_index]
+    local type_storage = surface_storage and surface_storage[qs_item.type]
+    local item_storage = type_storage and type_storage[qs_item.name]
+    local in_storage = item_storage and item_storage[qs_item.quality] or 0
     local in_player_inventory = 0
     if player_inventory and qs_item.type == "item" then
         if not player_surface_index then

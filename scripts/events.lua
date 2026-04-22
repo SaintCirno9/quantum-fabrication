@@ -733,6 +733,7 @@ end
 function on_tick(event)
     flib_dictionary.on_tick(event)
     if storage.qf_enabled == false then return end
+    tracking.on_tick_update_digitizer_queues()
     tracking.on_tick_update_requests()
     tracking.update_lost_module_requests_neo()
 end
