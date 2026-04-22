@@ -357,7 +357,6 @@ function on_space_platform_nth_tick(event)
         return
     end
     if event.nth_tick == 17 then
-        if not storage.qf_enabled then return end
         if storage.space_sendoff_next_tick and game.tick >= storage.space_sendoff_next_tick then
             storage.space_sendoff_next_tick = nil
             process_space_requests()
@@ -365,7 +364,6 @@ function on_space_platform_nth_tick(event)
         return
     end
     if event.nth_tick == 600 then
-        if not storage.qf_enabled then return end
         for platform_surface_index, platform_data in pairs(storage.surface_data.platforms) do
             refresh_platform_request_summary(platform_surface_index, platform_data)
         end
@@ -373,7 +371,6 @@ function on_space_platform_nth_tick(event)
 end
 
 function on_entity_logistic_slot_changed(event)
-    if not storage.qf_enabled then return end
     local entity = event.entity
     if entity.valid and entity.type == "space-platform-hub" then
         local platform_data = storage.surface_data.platforms[entity.surface_index]
@@ -385,7 +382,6 @@ function on_entity_logistic_slot_changed(event)
 end
 
 function on_space_platform_changed_state(event)
-    if not storage.qf_enabled then return end
     local old_state = event.old_state
     local state = event.platform.state
     if old_state == defines.space_platform_state.on_the_path and state == defines.space_platform_state.waiting_at_station then
