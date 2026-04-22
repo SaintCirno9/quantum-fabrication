@@ -18,6 +18,29 @@ local qs_utils = {}
 local decraft_queue_batch_size = 2
 local decraft_queue_item_max_count = 64
 local storage_signal_types = {"item", "fluid"}
+local pull_item_insert_params = {
+    name = "",
+    count = 0,
+    quality = QS_DEFAULT_QUALITY,
+}
+local pull_fluid_insert_params = {
+    name = "",
+    amount = 0,
+    temperature = nil,
+}
+
+local function begin_instrument_sample()
+    if not qf_instrument_begin_sample then
+        return nil
+    end
+    return qf_instrument_begin_sample()
+end
+
+local function end_instrument_sample(profiler, stat_name)
+    if profiler and stat_name then
+        qf_instrument_end_sample(stat_name, profiler)
+    end
+end
 
 local function get_storage_signal_key(item_type, item_name, quality_name)
     return item_type .. "|" .. item_name .. "|" .. quality_name
@@ -32,7 +55,7 @@ end
 local function ensure_storage_signal_cache(inventory)
     local filters = inventory.qf_storage_reader_filters
     local indices = inventory.qf_storage_reader_filter_indices
-    if filters and indices then
+    if filters and indices and not inventory.qf_storage_reader_cache_dirty then
         return filters, indices, false
     end
 
@@ -57,44 +80,17 @@ local function ensure_storage_signal_cache(inventory)
     end
     inventory.qf_storage_reader_filters = filters
     inventory.qf_storage_reader_filter_indices = indices
+    inventory.qf_storage_reader_cache_dirty = false
     return filters, indices, true
 end
 
-local function set_storage_signal_cache_count(filters, indices, item_type, item_name, quality_name, count)
-    local key = get_storage_signal_key(item_type, item_name, quality_name)
-    local index = indices[key]
-    if count > 0 then
-        local signal_count = get_storage_signal_count(count)
-        if index then
-            filters[index].min = signal_count
-            return
-        end
-        index = #filters + 1
-        indices[key] = index
-        filters[index] = {
-            value = {type = item_type, quality = quality_name, name = item_name},
-            min = signal_count,
-        }
+local function mark_storage_signal_cache_dirty(inventory)
+    local filters = inventory.qf_storage_reader_filters
+    local indices = inventory.qf_storage_reader_filter_indices
+    if not filters or not indices then
         return
     end
-
-    if not index then
-        return
-    end
-
-    local last_index = #filters
-    local last_filter = filters[last_index]
-    filters[last_index] = nil
-    indices[key] = nil
-    if index ~= last_index then
-        filters[index] = last_filter
-        indices[get_storage_signal_key(last_filter.value.type, last_filter.value.name, last_filter.value.quality)] = index
-    end
-end
-
-local function update_storage_signal_cache(inventory, item_type, item_name, quality_name, count)
-    local filters, indices = ensure_storage_signal_cache(inventory)
-    set_storage_signal_cache_count(filters, indices, item_type, item_name, quality_name, count)
+    inventory.qf_storage_reader_cache_dirty = true
 end
 
 local function ensure_decraft_queue_storage()
@@ -120,42 +116,51 @@ function qs_utils.add_to_storage(qs_item, try_defabricate, count_override)
     local inventory = storage.fabricator_inventory[qs_item.surface_index]
     local new_count = inventory[qs_item.type][qs_item.name][qs_item.quality] + (count_override or qs_item.count)
     inventory[qs_item.type][qs_item.name][qs_item.quality] = new_count
-    update_storage_signal_cache(inventory, qs_item.type, qs_item.name, qs_item.quality, new_count)
+    mark_storage_signal_cache_dirty(inventory)
     if try_defabricate and settings.global["qf-allow-decrafting"].value and not storage.tiles[qs_item.name] then decraft(qs_item) end
 end
 
 ---@param surface_index uint
 ---@param item_contents ItemWithQualityCounts
 ---@param try_defabricate? boolean
-function qs_utils.add_item_contents_to_storage(surface_index, item_contents, try_defabricate)
+---@param item_count? uint
+function qs_utils.add_item_contents_to_storage(surface_index, item_contents, try_defabricate, item_count)
     local inventory = storage.fabricator_inventory[surface_index]
-    local filters, indices = ensure_storage_signal_cache(inventory)
+    local filters = inventory.qf_storage_reader_filters
+    local indices = inventory.qf_storage_reader_filter_indices
     local stored_items = inventory.item
     local do_decraft = try_defabricate and settings.global["qf-allow-decrafting"].value
-    local decraft_item = nil
-    if do_decraft then
-        decraft_item = {
-            surface_index = surface_index,
-            name = "",
-            count = 0,
-            type = "item",
-            quality = QS_DEFAULT_QUALITY,
-        }
-    end
-    for index = 1, #item_contents do
+    local storage_profiler = begin_instrument_sample()
+    local storage_count_write_profiler = nil
+    local storage_signal_cache_profiler = nil
+    local processed_item_count = item_count or #item_contents
+    for index = 1, processed_item_count do
         local item = item_contents[index]
         local item_name = item.name
         local quality_name = item.quality
+        if storage_count_write_profiler then
+            storage_count_write_profiler.restart()
+        else
+            storage_count_write_profiler = begin_instrument_sample()
+        end
         local new_count = stored_items[item_name][quality_name] + item.count
         stored_items[item_name][quality_name] = new_count
-        set_storage_signal_cache_count(filters, indices, "item", item_name, quality_name, new_count)
+        if storage_count_write_profiler then
+            storage_count_write_profiler.stop()
+        end
         if do_decraft and not storage.tiles[item_name] then
-            decraft_item.name = item_name
-            decraft_item.count = item.count
-            decraft_item.quality = quality_name
-            decraft(decraft_item)
+            qs_utils.queue_decraft(surface_index, item_name, quality_name, item.count)
         end
     end
+    if filters and indices then
+        storage_signal_cache_profiler = begin_instrument_sample()
+        inventory.qf_storage_reader_cache_dirty = true
+        end_instrument_sample(storage_signal_cache_profiler, "qs_utils.add_item_contents_to_storage.storage.signal_cache")
+        storage_signal_cache_profiler = nil
+    end
+    end_instrument_sample(storage_profiler, "qs_utils.add_item_contents_to_storage.storage")
+    end_instrument_sample(storage_count_write_profiler, "qs_utils.add_item_contents_to_storage.storage.count_write")
+    end_instrument_sample(storage_signal_cache_profiler, "qs_utils.add_item_contents_to_storage.storage.signal_cache")
 end
 
 ---@param surface_index uint
@@ -240,7 +245,7 @@ function qs_utils.remove_from_storage(qs_item, count_override)
     local inventory = storage.fabricator_inventory[qs_item.surface_index]
     local new_count = inventory[qs_item.type][qs_item.name][qs_item.quality] - (count_override or qs_item.count)
     inventory[qs_item.type][qs_item.name][qs_item.quality] = new_count
-    update_storage_signal_cache(inventory, qs_item.type, qs_item.name, qs_item.quality, new_count)
+    mark_storage_signal_cache_dirty(inventory)
 end
 
 ---Removes items from both the Storage and the player's inventory
@@ -323,59 +328,91 @@ end
 ---Transfers items/fluids from storage to target inventory. Used by dedigitizing reactors and space requests
 ---@param qs_item QSItem
 ---@param target_inventory LuaInventory | LuaEntity
----@return StorageStatusTable
+---@return boolean
+---@return boolean
 function qs_utils.pull_from_storage(qs_item, target_inventory)
-    local in_storage = qs_utils.count_in_storage(qs_item)
-    local to_be_provided = qs_item.count
-    local status = {empty_storage = false, full_inventory = false}
-    if in_storage <= 0 then
-        status.empty_storage = true
-        return status
+    local storage_inventory = storage.fabricator_inventory[qs_item.surface_index]
+    if not storage_inventory then
+        return true, false
     end
+    local item_type = qs_item.type
+    local item_name = qs_item.name
+    local item_quality = qs_item.quality
+    local item_storage = storage_inventory[item_type][item_name]
+    local in_storage = item_storage[item_quality]
+    local to_be_provided = qs_item.count
+    if in_storage <= 0 then
+        return true, false
+    end
+    local empty_storage = false
     if in_storage < to_be_provided then
         to_be_provided = in_storage
-        status.empty_storage = true
+        empty_storage = true
     end
     if qs_item.type == "item" then
-        local inserted = target_inventory.insert({name = qs_item.name, count = to_be_provided, type = qs_item.type, quality = qs_item.quality})
+        pull_item_insert_params.name = item_name
+        pull_item_insert_params.count = to_be_provided
+        pull_item_insert_params.quality = item_quality
+        local inserted = target_inventory.insert(pull_item_insert_params)
         qs_item.count = inserted
-        qs_utils.remove_from_storage(qs_item)
+        if inserted <= 0 then
+            return empty_storage, true
+        end
+        local new_count = in_storage - inserted
+        item_storage[item_quality] = new_count
+        mark_storage_signal_cache_dirty(storage_inventory)
         if inserted < to_be_provided then
-            status.full_inventory = true
+            return empty_storage, true
         end
     elseif qs_item.type == "fluid" then
         local current_fluid = target_inventory.get_fluid_contents()
         for name, amount in pairs(current_fluid) do
-            if name == qs_item.name then
-                local fluid_insert_params = {name = qs_item.name, amount = to_be_provided}
+            if name == item_name then
+                pull_fluid_insert_params.name = item_name
+                pull_fluid_insert_params.amount = to_be_provided
                 if qs_item.temperature then
-                    fluid_insert_params.temperature = qs_item.temperature
+                    pull_fluid_insert_params.temperature = qs_item.temperature
+                else
+                    pull_fluid_insert_params.temperature = nil
                 end
                 ---@diagnostic disable-next-line: assign-type-mismatch
-                local inserted = target_inventory.insert_fluid(fluid_insert_params)
+                local inserted = target_inventory.insert_fluid(pull_fluid_insert_params)
                 qs_item.count = inserted
-                qs_utils.remove_from_storage(qs_item)
-                if inserted < to_be_provided then
-                    status.full_inventory = true
+                if inserted <= 0 then
+                    return empty_storage, true
                 end
-                return status
+                local new_count = in_storage - inserted
+                item_storage[item_quality] = new_count
+                mark_storage_signal_cache_dirty(storage_inventory)
+                if inserted < to_be_provided then
+                    return empty_storage, true
+                end
+                return empty_storage, false
             else
                 qs_utils.add_to_storage({surface_index = qs_item.surface_index, name = name, count = target_inventory.remove_fluid{name = name, amount = amount}, type = "fluid", quality = QS_DEFAULT_QUALITY})
             end
         end
-        local fluid_insert_params = {name = qs_item.name, amount = to_be_provided}
+        pull_fluid_insert_params.name = item_name
+        pull_fluid_insert_params.amount = to_be_provided
         if qs_item.temperature then
-            fluid_insert_params.temperature = qs_item.temperature
+            pull_fluid_insert_params.temperature = qs_item.temperature
+        else
+            pull_fluid_insert_params.temperature = nil
         end
         ---@diagnostic disable-next-line: assign-type-mismatch
-        local inserted = target_inventory.insert_fluid(fluid_insert_params)
+        local inserted = target_inventory.insert_fluid(pull_fluid_insert_params)
         qs_item.count = inserted
-        qs_utils.remove_from_storage(qs_item)
+        if inserted <= 0 then
+            return empty_storage, true
+        end
+        local new_count = in_storage - inserted
+        item_storage[item_quality] = new_count
+        mark_storage_signal_cache_dirty(storage_inventory)
         if inserted < to_be_provided then
-            status.full_inventory = true
+            return empty_storage, true
         end
     end
-    return status
+    return empty_storage, false
 end
 
 ---How many of that item is available in the storage (and player_inventory if it's provided)
@@ -387,9 +424,10 @@ end
 ---@return uint
 function qs_utils.count_in_storage(qs_item, player_inventory, player_surface_index)
     local surface_storage = storage.fabricator_inventory[qs_item.surface_index]
-    local type_storage = surface_storage and surface_storage[qs_item.type]
-    local item_storage = type_storage and type_storage[qs_item.name]
-    local in_storage = item_storage and item_storage[qs_item.quality] or 0
+    local in_storage = 0
+    if surface_storage then
+        in_storage = surface_storage[qs_item.type][qs_item.name][qs_item.quality]
+    end
     local in_player_inventory = 0
     if player_inventory and qs_item.type == "item" then
         if not player_surface_index then
@@ -490,8 +528,14 @@ end
 ---@param storage_index uint
 ---@return LogisticFilter[]
 function qs_utils.get_storage_signals(storage_index)
+    local build_profiler = begin_instrument_sample()
     local inventory = storage.fabricator_inventory[storage_index]
-    local signals = ensure_storage_signal_cache(inventory)
+    local signals, _, did_build = ensure_storage_signal_cache(inventory)
+    if did_build then
+        end_instrument_sample(build_profiler, "qs_utils.get_storage_signals.build")
+    elseif build_profiler then
+        build_profiler.stop()
+    end
     return signals
 end
 

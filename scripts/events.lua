@@ -736,6 +736,7 @@ function on_tick(event)
     tracking.on_tick_update_digitizer_queues()
     tracking.on_tick_update_requests()
     tracking.update_lost_module_requests_neo()
+    qs_utils.process_decraft_queue(8)
 end
 
 function post_research_recheck()
