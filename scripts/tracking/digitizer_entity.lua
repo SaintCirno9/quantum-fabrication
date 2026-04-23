@@ -60,6 +60,8 @@ return function(context)
         if not entity_data.signal_active then
             entity_data.has_unmet_signal_requests = false
             entity_data.parsed_signal_requests = nil
+            entity_data.unmet_signal_storage_index = nil
+            entity_data.unmet_signal_storage_version = nil
             local storage_surface = storage.fabricator_inventory[storage_index]
             local storage_items = storage_surface.item
             local storage_fluids = storage_surface.fluid
@@ -195,11 +197,22 @@ return function(context)
         local storage_surface = storage.fabricator_inventory[storage_index]
         local storage_items = storage_surface.item
         local storage_fluids = storage_surface.fluid
+        local storage_version = storage_surface.qf_storage_version or 0
+        local inventory_empty = not inventory or inventory.is_empty()
+        local current_fluid = get_container_fluid_state(entity_data.container_fluid)
+        local can_skip_unmet_signal_retry = had_unmet_signal_requests
+            and not entity_data.signals_changed
+            and inventory_empty
+            and current_fluid == nil
+            and entity_data.unmet_signal_storage_index == storage_index
+            and entity_data.unmet_signal_storage_version == storage_version
 
-        if inventory then
+        if can_skip_unmet_signal_retry then
+            has_unmet_signal_requests_after = true
+        elseif inventory then
             read_contents = digitizer_chest_reads_contents(entity)
             local inventory_contents
-            if not inventory.is_empty() then
+            if not inventory_empty then
                 inventory_contents = inventory.get_contents()
                 ensure_processing_items_mutable()
                 item_qs_item.surface_index = storage_index
@@ -311,9 +324,8 @@ return function(context)
                 end
             end
         end
-        local fluid_contents = entity_data.container_fluid and entity_data.container_fluid.get_fluid_contents()
+        local fluid_contents = not can_skip_unmet_signal_retry and entity_data.container_fluid and entity_data.container_fluid.get_fluid_contents()
         if fluid_contents then
-            local current_fluid = get_container_fluid_state(entity_data.container_fluid)
             item_qs_fluid.surface_index = storage_index
             item_qs_fluid.temperature = nil
             for name, count in pairs(fluid_contents) do
@@ -383,6 +395,13 @@ return function(context)
             entity_data.active_until_tick = game.tick + digitizer_chest_active_keepalive_ticks
         end
         entity_data.has_unmet_signal_requests = has_unmet_signal_requests_after
+        if has_unmet_signal_requests_after then
+            entity_data.unmet_signal_storage_index = storage_index
+            entity_data.unmet_signal_storage_version = storage_version
+        else
+            entity_data.unmet_signal_storage_index = nil
+            entity_data.unmet_signal_storage_version = nil
+        end
         if has_unmet_signal_requests_after or game.tick <= entity_data.active_until_tick then
             set_digitizer_chest_queue(entity_data, "signal")
         else

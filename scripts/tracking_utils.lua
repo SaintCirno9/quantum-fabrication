@@ -120,6 +120,8 @@ end
 ---@field inventory_processing? table
 ---@field has_unmet_signal_requests? boolean
 ---@field parsed_signal_requests? table
+---@field unmet_signal_storage_index? uint
+---@field unmet_signal_storage_version? uint
 
 ---@class EntitySettings
 ---@field intake_limit? uint
@@ -1049,6 +1051,10 @@ update_digitizer_chest_wake_schedule = function(entity_data)
         remove_digitizer_deadline_entry(queues, entity_data)
         return
     end
+    if entity_data.queue_name == "signal" or entity_data.queue_name == "active" then
+        remove_digitizer_deadline_entry(queues, entity_data)
+        return
+    end
     schedule_digitizer_deadline(queues, entity_data, get_digitizer_entity_next_dispatch_tick(entity_data))
 end
 
@@ -1208,6 +1214,8 @@ function tracking.invalidate_digitizer_chest_processable_cache(entity_data, wake
     entity_data.cached_has_processable_contents = nil
     entity_data.next_processable_recheck_tick = 0
     entity_data.processable_check_interval_ticks = digitizer_chest_processable_recheck_ticks
+    entity_data.unmet_signal_storage_index = nil
+    entity_data.unmet_signal_storage_version = nil
     if wake_queue and entity_data.queue_name == "long_idle" then
         set_digitizer_chest_queue(entity_data, "idle")
     end
@@ -1410,6 +1418,47 @@ local function get_budgeted_digitizer_queue_work(queues, budget_key, queue_name,
     return work
 end
 
+local function process_digitizer_chest_queue_budgeted(queue_name, max_processed)
+    if max_processed <= 0 then
+        return
+    end
+
+    local queues = ensure_digitizer_chest_queue_storage()
+    local queue = queues[queue_name]
+    local request_id_key = "digitizer-chest-" .. queue_name
+    local queue_size = get_digitizer_queue_size(queues, queue_name)
+    if queue_size <= 0 then
+        storage.request_ids[request_id_key] = nil
+        return
+    end
+
+    local current_key = storage.request_ids[request_id_key]
+    if current_key and not queue[current_key] then
+        current_key = nil
+    end
+    if not current_key then
+        current_key = next(queue)
+    end
+
+    local processed = 0
+    while current_key and processed < max_processed do
+        local key = current_key
+        current_key = next(queue, key)
+        local entity_data = queue[key]
+        if entity_data and not entity_data.dirty_queued then
+            local entity = entity_data.entity
+            if not entity or not entity.valid then
+                tracking.remove_tracked_entity(entity_data)
+            else
+                tracking.update_entity(entity_data)
+            end
+        end
+        processed = processed + 1
+    end
+
+    storage.request_ids[request_id_key] = current_key
+end
+
 local function pop_next_due_digitizer_deadline(queues)
     local deadlines = queues.deadlines
     local current_tick = deadlines.min_tick
@@ -1504,9 +1553,7 @@ function tracking.on_tick_update_digitizer_queues()
     local queues = ensure_digitizer_chest_queue_storage()
 
     local deadline_budget
-        = get_budgeted_digitizer_queue_work(queues, "signal_deadline", "signal", digitizer_chest_signal_nth_tick, 4)
-        + get_budgeted_digitizer_queue_work(queues, "active_deadline", "active", digitizer_chest_active_nth_tick, 4)
-        + get_budgeted_digitizer_queue_work(queues, "idle_deadline", "idle", digitizer_chest_idle_nth_tick, 2)
+        = get_budgeted_digitizer_queue_work(queues, "idle_deadline", "idle", digitizer_chest_idle_nth_tick, 2)
         + get_budgeted_digitizer_queue_work(queues, "long_idle_deadline", "long_idle", digitizer_chest_long_idle_nth_tick, 1)
 
     local dirty_budget
@@ -1515,8 +1562,14 @@ function tracking.on_tick_update_digitizer_queues()
         + get_budgeted_digitizer_queue_work(queues, "idle_dirty", "idle", digitizer_chest_idle_nth_tick, 2)
         + get_budgeted_digitizer_queue_work(queues, "long_idle_dirty", "long_idle", digitizer_chest_long_idle_nth_tick, 1)
 
+    process_digitizer_chest_queue_budgeted("signal", get_budgeted_digitizer_queue_work(
+        queues, "signal", "signal", digitizer_chest_signal_nth_tick, 4))
+
+    process_digitizer_chest_queue_budgeted("active", get_budgeted_digitizer_queue_work(
+        queues, "active", "active", digitizer_chest_active_nth_tick, 4))
+
     collect_due_digitizer_deadlines_budgeted(deadline_budget)
-    process_dirty_digitizer_chests_budgeted(math.max(dirty_budget, deadline_budget, 1))
+    process_dirty_digitizer_chests_budgeted(math.max(dirty_budget, deadline_budget))
 end
 local tracking_context = {
     tracking = tracking,
