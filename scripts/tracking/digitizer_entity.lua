@@ -66,8 +66,9 @@ return function(context)
             local storage_items = storage_surface.item
             local storage_fluids = storage_surface.fluid
             local moved_contents = false
+            local inventory_contents = nil
             if inventory and not inventory.is_empty() then
-                local inventory_contents = inventory.get_contents()
+                inventory_contents = inventory.get_contents()
                 item_qs_item.surface_index = storage_index
                 if limit_value == 0 then
                     if next(inventory_contents) then
@@ -95,17 +96,19 @@ return function(context)
                 else
                     for _, item in pairs(inventory_contents) do
                         local removable_count = item.count - reserve_limit
-                        local remaining_capacity = digitizer_intake_limit_remaining_capacity(item.name, item.quality, storage_index, storage_items, limit_value, decraft)
-                        if removable_count > 0 and remaining_capacity > 0 then
-                            item_qs_item.name = item.name
-                            item_qs_item.count = math.min(removable_count, remaining_capacity)
-                            item_qs_item.quality = item.quality
-                            qs_utils.add_to_storage(item_qs_item, decraft)
-                            item_remove_params.name = item.name
-                            item_remove_params.count = item_qs_item.count
-                            item_remove_params.quality = item.quality
-                            inventory.remove(item_remove_params)
-                            moved_contents = true
+                        if removable_count > 0 then
+                            local remaining_capacity = digitizer_intake_limit_remaining_capacity(item.name, item.quality, storage_index, storage_items, limit_value, decraft)
+                            if remaining_capacity > 0 then
+                                item_qs_item.name = item.name
+                                item_qs_item.count = math.min(removable_count, remaining_capacity)
+                                item_qs_item.quality = item.quality
+                                qs_utils.add_to_storage(item_qs_item, decraft)
+                                item_remove_params.name = item.name
+                                item_remove_params.count = item_qs_item.count
+                                item_remove_params.quality = item.quality
+                                inventory.remove(item_remove_params)
+                                moved_contents = true
+                            end
                         end
                     end
                 end
@@ -282,43 +285,45 @@ return function(context)
                 end
             end
             for item_name, item_by_quality in pairs(processing_items) do
-                for item_quality, item_count in pairs(item_by_quality) do
-                    if item_count > 0 then
-                        local remaining_item_count = item_count
-                        item_qs_item.name = item_name
-                        item_qs_item.count = item_count
-                        item_qs_item.quality = item_quality
-                        item_qs_item.surface_index = storage_index
-                        local requested_item_count = item_qs_item.count
-                        local empty_storage, full_inventory = qs_utils.pull_from_storage(item_qs_item, inventory)
-                        local pulled_item_count = item_qs_item.count
-                        if empty_storage and pulled_item_count == requested_item_count then
-                            pulled_item_count = 0
-                        end
-                        remaining_item_count = remaining_item_count - pulled_item_count
-                        if pulled_item_count > 0 then
-                            pulled_signal_contents = true
-                        end
-                        if remaining_item_count > 0 and not full_inventory and fetchable then
-                            item_qs_item.count = remaining_item_count
-                            fabricate_digitizer_requested_item(item_qs_item, inventory)
-                            if item_qs_item.count > 0 then
+                if next(item_by_quality) then
+                    for item_quality, item_count in pairs(item_by_quality) do
+                        if item_count > 0 then
+                            local remaining_item_count = item_count
+                            item_qs_item.name = item_name
+                            item_qs_item.count = item_count
+                            item_qs_item.quality = item_quality
+                            item_qs_item.surface_index = storage_index
+                            local requested_item_count = item_qs_item.count
+                            local empty_storage, full_inventory = qs_utils.pull_from_storage(item_qs_item, inventory)
+                            local pulled_item_count = item_qs_item.count
+                            if empty_storage and pulled_item_count == requested_item_count then
+                                pulled_item_count = 0
+                            end
+                            remaining_item_count = remaining_item_count - pulled_item_count
+                            if pulled_item_count > 0 then
                                 pulled_signal_contents = true
                             end
-                            remaining_item_count = remaining_item_count - item_qs_item.count
-                        end
-                        if processing_items_mutable then
-                            if remaining_item_count > 0 then
-                                item_by_quality[item_quality] = remaining_item_count
-                            else
-                                item_by_quality[item_quality] = nil
+                            if remaining_item_count > 0 and not full_inventory and fetchable then
+                                item_qs_item.count = remaining_item_count
+                                fabricate_digitizer_requested_item(item_qs_item, inventory)
+                                if item_qs_item.count > 0 then
+                                    pulled_signal_contents = true
+                                end
+                                remaining_item_count = remaining_item_count - item_qs_item.count
                             end
-                        end
-                        if remaining_item_count > 0 then
-                            has_unmet_signal_requests_after = true
-                        end
-                        if full_inventory then
-                            has_unmet_signal_requests_after = true
+                            if processing_items_mutable then
+                                if remaining_item_count > 0 then
+                                    item_by_quality[item_quality] = remaining_item_count
+                                else
+                                    item_by_quality[item_quality] = nil
+                                end
+                            end
+                            if remaining_item_count > 0 then
+                                has_unmet_signal_requests_after = true
+                            end
+                            if full_inventory then
+                                has_unmet_signal_requests_after = true
+                            end
                         end
                     end
                 end

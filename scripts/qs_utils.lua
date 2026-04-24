@@ -71,13 +71,40 @@ local function ensure_storage_signal_cache(inventory)
     return filters, indices, true
 end
 
-local function mark_storage_signal_cache_dirty(inventory)
+local function update_storage_signal_cache_count(inventory, item_type, item_name, quality_name, count)
     local filters = inventory.qf_storage_reader_filters
     local indices = inventory.qf_storage_reader_filter_indices
-    if not filters or not indices then
+    if not filters or not indices or inventory.qf_storage_reader_cache_dirty then
         return
     end
-    inventory.qf_storage_reader_cache_dirty = true
+
+    local key = get_storage_signal_key(item_type, item_name, quality_name)
+    local index = indices[key]
+    if count > 0 then
+        if index then
+            filters[index].min = get_storage_signal_count(count)
+        else
+            indices[key] = #filters + 1
+            filters[#filters + 1] = {
+                value = {type = item_type, quality = quality_name, name = item_name},
+                min = get_storage_signal_count(count),
+            }
+        end
+        return
+    end
+
+    if not index then
+        return
+    end
+    local last_index = #filters
+    local last_filter = filters[last_index]
+    filters[index] = last_filter
+    filters[last_index] = nil
+    indices[key] = nil
+    if index ~= last_index and last_filter then
+        local value = last_filter.value
+        indices[get_storage_signal_key(value.type, value.name, value.quality)] = index
+    end
 end
 
 local function ensure_storage_metadata(inventory)
@@ -120,7 +147,7 @@ function qs_utils.add_to_storage(qs_item, try_defabricate, count_override)
     ensure_storage_metadata(inventory)
     local new_count = inventory[qs_item.type][qs_item.name][qs_item.quality] + (count_override or qs_item.count)
     inventory[qs_item.type][qs_item.name][qs_item.quality] = new_count
-    mark_storage_signal_cache_dirty(inventory)
+    update_storage_signal_cache_count(inventory, qs_item.type, qs_item.name, qs_item.quality, new_count)
     bump_storage_version(inventory)
     if try_defabricate and settings.global["qf-allow-decrafting"].value and not storage.tiles[qs_item.name] then decraft(qs_item) end
 end
@@ -132,8 +159,6 @@ end
 function qs_utils.add_item_contents_to_storage(surface_index, item_contents, try_defabricate, item_count)
     local inventory = storage.fabricator_inventory[surface_index]
     ensure_storage_metadata(inventory)
-    local filters = inventory.qf_storage_reader_filters
-    local indices = inventory.qf_storage_reader_filter_indices
     local stored_items = inventory.item
     local do_decraft = try_defabricate and settings.global["qf-allow-decrafting"].value
     local processed_item_count = item_count or #item_contents
@@ -143,12 +168,10 @@ function qs_utils.add_item_contents_to_storage(surface_index, item_contents, try
         local quality_name = item.quality
         local new_count = stored_items[item_name][quality_name] + item.count
         stored_items[item_name][quality_name] = new_count
+        update_storage_signal_cache_count(inventory, "item", item_name, quality_name, new_count)
         if do_decraft and not storage.tiles[item_name] then
             qs_utils.queue_decraft(surface_index, item_name, quality_name, item.count)
         end
-    end
-    if filters and indices then
-        inventory.qf_storage_reader_cache_dirty = true
     end
     if processed_item_count > 0 then
         bump_storage_version(inventory)
@@ -238,7 +261,7 @@ function qs_utils.remove_from_storage(qs_item, count_override)
     ensure_storage_metadata(inventory)
     local new_count = inventory[qs_item.type][qs_item.name][qs_item.quality] - (count_override or qs_item.count)
     inventory[qs_item.type][qs_item.name][qs_item.quality] = new_count
-    mark_storage_signal_cache_dirty(inventory)
+    update_storage_signal_cache_count(inventory, qs_item.type, qs_item.name, qs_item.quality, new_count)
     bump_storage_version(inventory)
 end
 
@@ -356,7 +379,7 @@ function qs_utils.pull_from_storage(qs_item, target_inventory)
         end
         local new_count = in_storage - inserted
         item_storage[item_quality] = new_count
-        mark_storage_signal_cache_dirty(storage_inventory)
+        update_storage_signal_cache_count(storage_inventory, item_type, item_name, item_quality, new_count)
         bump_storage_version(storage_inventory)
         if inserted < to_be_provided then
             return empty_storage, true
@@ -380,7 +403,7 @@ function qs_utils.pull_from_storage(qs_item, target_inventory)
                 end
                 local new_count = in_storage - inserted
                 item_storage[item_quality] = new_count
-                mark_storage_signal_cache_dirty(storage_inventory)
+                update_storage_signal_cache_count(storage_inventory, item_type, item_name, item_quality, new_count)
                 bump_storage_version(storage_inventory)
                 if inserted < to_be_provided then
                     return empty_storage, true
@@ -405,7 +428,7 @@ function qs_utils.pull_from_storage(qs_item, target_inventory)
         end
         local new_count = in_storage - inserted
         item_storage[item_quality] = new_count
-        mark_storage_signal_cache_dirty(storage_inventory)
+        update_storage_signal_cache_count(storage_inventory, item_type, item_name, item_quality, new_count)
         bump_storage_version(storage_inventory)
         if inserted < to_be_provided then
             return empty_storage, true

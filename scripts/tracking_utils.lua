@@ -307,7 +307,7 @@ function tracking.rebuild_digitizer_chest_queues()
         long_idle_size = 0,
         dirty = {},
         dirty_size = 0,
-        deadlines = {by_tick = {}, min_tick = nil},
+        deadlines = {by_tick = {}, min_tick = nil, tick_heap = {}, tick_queued = {}},
         full_pass_seconds = {},
     }
     local queues = storage.tracked_entity_queues["digitizer-chest"]
@@ -488,10 +488,11 @@ local function digitizer_chest_reads_contents(entity)
 end
 
 local function reset_digitizer_inventory_processing(inventory_processing)
-    for _, item_by_quality in pairs(inventory_processing.items) do
+    for item_name, item_by_quality in pairs(inventory_processing.items) do
         for quality_name, _ in pairs(item_by_quality) do
             item_by_quality[quality_name] = nil
         end
+        inventory_processing.items[item_name] = nil
     end
     for item_name, _ in pairs(inventory_processing.preprocessed_items) do
         inventory_processing.preprocessed_items[item_name] = nil
@@ -964,30 +965,83 @@ local function remove_digitizer_dirty_entry(queues, unit_number)
     return entity_data
 end
 
-local function refresh_digitizer_deadline_min_tick(deadlines)
-    local min_tick = nil
+local function digitizer_deadline_heap_push(heap, tick)
+    local index = #heap + 1
+    heap[index] = tick
+    while index > 1 do
+        local parent_index = math.floor(index / 2)
+        local parent_tick = heap[parent_index]
+        if parent_tick <= tick then
+            break
+        end
+        heap[index] = parent_tick
+        index = parent_index
+    end
+    heap[index] = tick
+end
+
+local function digitizer_deadline_heap_pop(heap)
+    local min_tick = heap[1]
+    local last_tick = heap[#heap]
+    heap[#heap] = nil
+    if #heap > 0 then
+        local index = 1
+        while true do
+            local left_index = index * 2
+            local right_index = left_index + 1
+            local child_index = left_index
+            local child_tick = heap[child_index]
+            if not child_tick then
+                break
+            end
+            local right_tick = heap[right_index]
+            if right_tick and right_tick < child_tick then
+                child_index = right_index
+                child_tick = right_tick
+            end
+            if last_tick <= child_tick then
+                break
+            end
+            heap[index] = child_tick
+            index = child_index
+        end
+        heap[index] = last_tick
+    end
+    return min_tick
+end
+
+local function ensure_digitizer_deadline_storage(deadlines)
+    deadlines.by_tick = deadlines.by_tick or {}
+    if deadlines.tick_heap and deadlines.tick_queued then
+        return deadlines
+    end
+
+    deadlines.tick_heap = {}
+    deadlines.tick_queued = {}
     for tick, bucket in pairs(deadlines.by_tick) do
-        if bucket and next(bucket) ~= nil and (not min_tick or tick < min_tick) then
-            min_tick = tick
+        if bucket and next(bucket) ~= nil then
+            digitizer_deadline_heap_push(deadlines.tick_heap, tick)
+            deadlines.tick_queued[tick] = true
+        else
+            deadlines.by_tick[tick] = nil
         end
     end
-    deadlines.min_tick = min_tick
+    deadlines.min_tick = deadlines.tick_heap[1]
+    return deadlines
 end
 
 local function remove_digitizer_deadline_entry(queues, entity_data)
     if not entity_data or not entity_data.deadline_tick then
         return
     end
-    local deadlines = queues.deadlines
+    local deadlines = ensure_digitizer_deadline_storage(queues.deadlines)
     local deadline_tick = entity_data.deadline_tick
     local bucket = deadlines.by_tick[deadline_tick]
     if bucket and bucket[entity_data.unit_number] then
         bucket[entity_data.unit_number] = nil
         if next(bucket) == nil then
             deadlines.by_tick[deadline_tick] = nil
-            if deadlines.min_tick == deadline_tick then
-                refresh_digitizer_deadline_min_tick(deadlines)
-            end
+            deadlines.tick_queued[deadline_tick] = nil
         end
     end
     entity_data.deadline_tick = nil
@@ -1030,15 +1084,20 @@ local function schedule_digitizer_deadline(queues, entity_data, deadline_tick)
     if not deadline_tick then
         return
     end
-    local bucket = queues.deadlines.by_tick[deadline_tick]
+    local deadlines = ensure_digitizer_deadline_storage(queues.deadlines)
+    local bucket = deadlines.by_tick[deadline_tick]
     if not bucket then
         bucket = {}
-        queues.deadlines.by_tick[deadline_tick] = bucket
+        deadlines.by_tick[deadline_tick] = bucket
+        if not deadlines.tick_queued[deadline_tick] then
+            digitizer_deadline_heap_push(deadlines.tick_heap, deadline_tick)
+            deadlines.tick_queued[deadline_tick] = true
+        end
     end
     bucket[entity_data.unit_number] = true
     entity_data.deadline_tick = deadline_tick
-    if not queues.deadlines.min_tick or deadline_tick < queues.deadlines.min_tick then
-        queues.deadlines.min_tick = deadline_tick
+    if not deadlines.min_tick or deadline_tick < deadlines.min_tick then
+        deadlines.min_tick = deadline_tick
     end
 end
 
@@ -1077,7 +1136,7 @@ ensure_digitizer_chest_queue_storage = function()
             long_idle_size = 0,
             dirty = {},
             dirty_size = 0,
-            deadlines = {by_tick = {}, min_tick = nil},
+            deadlines = {by_tick = {}, min_tick = nil, tick_heap = {}, tick_queued = {}},
         }
         storage.tracked_entity_queues["digitizer-chest"] = queues
     end
@@ -1092,7 +1151,7 @@ ensure_digitizer_chest_queue_storage = function()
     queues.long_idle_size = queues.long_idle_size or table_size(queues.long_idle)
     queues.dirty = queues.dirty or {}
     queues.dirty_size = queues.dirty_size or table_size(queues.dirty)
-    queues.deadlines = queues.deadlines or {by_tick = {}, min_tick = nil}
+    queues.deadlines = ensure_digitizer_deadline_storage(queues.deadlines or {by_tick = {}, min_tick = nil, tick_heap = {}, tick_queued = {}})
 
     if not storage.request_ids then
         storage.request_ids = {}
@@ -1132,7 +1191,7 @@ ensure_digitizer_chest_queue_storage = function()
     queues.full_pass_seconds = {}
     queues.dirty = {}
     queues.dirty_size = 0
-    queues.deadlines = {by_tick = {}, min_tick = nil}
+    queues.deadlines = {by_tick = {}, min_tick = nil, tick_heap = {}, tick_queued = {}}
 
     if tracked_entities then
         for unit_number, entity_data in pairs(tracked_entities) do
@@ -1460,24 +1519,38 @@ local function process_digitizer_chest_queue_budgeted(queue_name, max_processed)
 end
 
 local function pop_next_due_digitizer_deadline(queues)
-    local deadlines = queues.deadlines
-    local current_tick = deadlines.min_tick
-    while current_tick and current_tick <= game.tick do
+    local deadlines = ensure_digitizer_deadline_storage(queues.deadlines)
+    local heap = deadlines.tick_heap
+    while true do
+        local current_tick = heap[1]
+        if not current_tick then
+            deadlines.min_tick = nil
+            return nil, nil
+        end
+
         local bucket = deadlines.by_tick[current_tick]
-        local unit_number = bucket and next(bucket)
-        if unit_number then
+        if not bucket or next(bucket) == nil then
+            digitizer_deadline_heap_pop(heap)
+            deadlines.by_tick[current_tick] = nil
+            deadlines.tick_queued[current_tick] = nil
+            deadlines.min_tick = heap[1]
+        else
+            deadlines.min_tick = current_tick
+            if current_tick > game.tick then
+                return nil, nil
+            end
+
+            local unit_number = next(bucket)
             bucket[unit_number] = nil
             if next(bucket) == nil then
                 deadlines.by_tick[current_tick] = nil
-                refresh_digitizer_deadline_min_tick(deadlines)
+                digitizer_deadline_heap_pop(heap)
+                deadlines.tick_queued[current_tick] = nil
+                deadlines.min_tick = heap[1]
             end
             return current_tick, unit_number
         end
-        deadlines.by_tick[current_tick] = nil
-        refresh_digitizer_deadline_min_tick(deadlines)
-        current_tick = deadlines.min_tick
     end
-    return nil, nil
 end
 
 local function collect_due_digitizer_deadlines_budgeted(max_processed)

@@ -13,7 +13,7 @@ local Digitizer_queue_display_names = {
 local function get_digitizer_hover_text(entity_data)
     local queue_name = entity_data.queue_name or "active"
     local full_pass_seconds = tracking.get_digitizer_queue_full_pass_seconds(queue_name)
-    local queue_text = "队列: " .. (Digitizer_queue_display_names[queue_name] or queue_name) .. " " .. string.format("%.2fS", full_pass_seconds)
+    local queue_text = string.format("队列: %s %.2fS", Digitizer_queue_display_names[queue_name] or queue_name, full_pass_seconds)
     local container_fluid = entity_data.container_fluid
     if not container_fluid or not container_fluid.valid then
         return queue_text
@@ -22,14 +22,14 @@ local function get_digitizer_hover_text(entity_data)
     local fluid_lines = {}
     local index = 1
     for fluid_name, amount in pairs(container_fluid.get_fluid_contents()) do
-        fluid_lines[index] = fluid_name .. " : " .. string.format("%.1f", amount)
+        fluid_lines[index] = string.format("%s : %.1f", fluid_name, amount)
         index = index + 1
     end
     if index == 1 then
         return queue_text
     end
     table.sort(fluid_lines)
-    return queue_text .. " | " .. table.concat(fluid_lines, " | ")
+    return string.format("%s | %s", queue_text, table.concat(fluid_lines, " | "))
 end
 
 local function destroy_digitizer_hover_text(player_index)
