@@ -53,7 +53,7 @@ local digitizer_chest_active_keepalive_ticks = math.max(digitizer_chest_active_n
 local digitizer_chest_processable_recheck_ticks = digitizer_chest_active_nth_tick
 local digitizer_chest_processable_recheck_max_ticks = digitizer_chest_idle_nth_tick
 local digitizer_queue_dynamic_batch_divisor = 6
-local digitizer_queue_full_pass_seconds_cache_version = 4
+local digitizer_queue_full_pass_seconds_cache_version = 5
 local digitizer_queue_max_work_per_tick = {
     signal = 8,
     active = 16,
@@ -474,7 +474,11 @@ end
 
 local function digitizer_chest_reads_contents(entity)
     if entity.name == "digitizer-passive-provider-chest" or entity.name == "digitizer-requester-chest" then
-        return true
+        local control_behavior = entity.get_control_behavior()
+        if not control_behavior then
+            return false
+        end
+        return control_behavior.circuit_exclusive_mode_of_operation == defines.control_behavior.logistic_container.exclusive_mode.send_contents
     end
     if entity.name ~= "digitizer-chest" then
         return false
@@ -1303,7 +1307,7 @@ end
 get_dynamic_digitizer_queue_batch = function(queues, queue_name, base_batch_size)
     local queue_size = get_digitizer_queue_size(queues, queue_name)
     if queue_size <= base_batch_size then
-        return base_batch_size
+        return queue_size
     end
     local dynamic_batch_size = math.ceil(queue_size / digitizer_queue_dynamic_batch_divisor)
     if dynamic_batch_size < base_batch_size then
