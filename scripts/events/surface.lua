@@ -12,6 +12,7 @@ local handlers = {}
 ---@field hub_inventory? LuaInventory
 ---@field planet? LuaPlanet
 ---@field rocket_silo? LuaEntity
+---@field next_rocket_silo_scan_tick? uint
 
 function handlers.initialize_surfaces()
     for _, surface in pairs(game.surfaces) do
@@ -41,7 +42,7 @@ function handlers.initialize_surface(surface)
         if settings.global["qf-unified-storage"].value then
             storage.fabricator_inventory[surface_index] = storage.fabricator_inventory[1]
         end
-        local rocket_silo = surface.find_entities_filtered({type = "rocket-silo", limit = 1})[1]
+        local rocket_silo = find_usable_rocket_silo(surface)
         if rocket_silo then
             data.rocket_silo = rocket_silo
         end

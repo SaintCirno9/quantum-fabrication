@@ -18,6 +18,14 @@ local function ensure_space_sendoff_state()
     end
 end
 
+local function is_usable_rocket_silo(silo)
+    if not silo or not silo.valid or silo.type ~= "rocket-silo" then
+        return false
+    end
+    local silo_prototype = silo.prototype
+    return silo_prototype.launch_to_space_platforms and silo_prototype.name ~= "planet-hopper-launcher" and silo.get_recipe() ~= nil
+end
+
 ---@param delay_ticks uint
 ---@param platform_surface_index? uint
 ---@param full_scan? boolean
@@ -61,6 +69,37 @@ function get_storage_index(space_location_prototype, player)
         end
     end
     return index
+end
+
+function cache_rocket_silo(entity)
+    if not is_usable_rocket_silo(entity) then
+        return
+    end
+    local planet_data = storage.surface_data.planets[entity.surface_index]
+    if planet_data then
+        planet_data.rocket_silo = entity
+        planet_data.next_rocket_silo_scan_tick = nil
+        schedule_space_sendoff(2, nil, true)
+    end
+end
+
+function find_usable_rocket_silo(surface)
+    for _, silo in pairs(surface.find_entities_filtered({ type = "rocket-silo" })) do
+        if is_usable_rocket_silo(silo) then
+            return silo
+        end
+    end
+end
+
+function clear_cached_rocket_silo(entity)
+    if not entity or entity.type ~= "rocket-silo" then
+        return
+    end
+    local planet_data = storage.surface_data.planets[entity.surface_index]
+    if planet_data and planet_data.rocket_silo == entity then
+        planet_data.rocket_silo = nil
+        planet_data.next_rocket_silo_scan_tick = nil
+    end
 end
 
 function incoming_items(requester)
@@ -217,22 +256,28 @@ end
 
 ---Updates the main rocket silo for a given surface. Returns true if a valid silo was found
 ---@param storage_index uint
+---@param allow_scan? boolean
 ---@return boolean
-function update_main_silo(storage_index)
-    storage.surface_data.planets[storage_index].rocket_silo = nil
-    local rocket_silo
-    for _, silo in pairs(game.get_surface(storage_index).find_entities_filtered({ type = "rocket-silo" })) do
-        local silo_prototype = silo.prototype
-        --- Can the silo actually carry materials?
-        if silo_prototype.launch_to_space_platforms and silo_prototype.name ~= "planet-hopper-launcher" and silo.get_recipe() then
-            rocket_silo = silo
-            break
-        end
+function update_main_silo(storage_index, allow_scan)
+    local planet_data = storage.surface_data.planets[storage_index]
+    local rocket_silo = planet_data.rocket_silo
+    if is_usable_rocket_silo(rocket_silo) then
+        return true
     end
+    planet_data.rocket_silo = nil
+    if not allow_scan then
+        return false
+    end
+    if planet_data.next_rocket_silo_scan_tick and game.tick < planet_data.next_rocket_silo_scan_tick then
+        return false
+    end
+    rocket_silo = find_usable_rocket_silo(game.get_surface(storage_index))
     if rocket_silo then
-        storage.surface_data.planets[storage_index].rocket_silo = rocket_silo
+        planet_data.rocket_silo = rocket_silo
+        planet_data.next_rocket_silo_scan_tick = nil
         return true
     else
+        planet_data.next_rocket_silo_scan_tick = game.tick + 600
         return false
     end
 end

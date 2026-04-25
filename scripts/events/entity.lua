@@ -13,6 +13,7 @@ function handlers.on_built_entity(event)
     end
     if entity and entity.valid then
         chunks_utils.add_chunk(entity.surface_index, entity.position)
+        cache_rocket_silo(entity)
         if entity.type == "entity-ghost" then
             tracking.create_tracked_request({
                 request_type = "revivals",
@@ -104,6 +105,7 @@ function handlers.on_destroyed(event)
     local entity = event.entity
     if entity and entity.valid then
         shared.store_recent_cloneable_settings(entity)
+        clear_cached_rocket_silo(entity)
         if Trackable_entities[entity.name] then
             local entity_data = tracking.get_entity_data(entity)
             tracking.remove_tracked_entity(entity_data)
