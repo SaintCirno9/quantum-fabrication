@@ -73,6 +73,15 @@ function create_digitizer_chest_gui(player, entity)
     decraft_button.tags = {unit_number = entity.unit_number}
     decraft_button.style.width = 150
 
+    local preserve_freshness_checkbox = main_content_frame.add{
+        type = "checkbox",
+        name = "qf_preserve_freshness_checkbox",
+        state = entity_settings.preserve_freshness == true,
+        caption = {"qf-entity.digitizer-chest-preserve-freshness"},
+        tooltip = {"qf-entity.digitizer-chest-preserve-freshness-tooltip"},
+    }
+    preserve_freshness_checkbox.tags = {unit_number = entity.unit_number}
+
     if entity.name == "digitizer-chest" then
         local fluid_checkbox = main_content_frame.add{
             type = "checkbox",

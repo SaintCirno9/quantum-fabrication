@@ -21,7 +21,6 @@ local function create_digitizer_logistic_chest(base_name, new_name, icon, order)
     entity.icon = nil
     entity.icons = create_digitizer_logistic_icons(icon)
     entity.minable = {mining_time = 0.2, result = new_name}
-    entity.inventory_size = 48
 
     local item = {
         type = "item",

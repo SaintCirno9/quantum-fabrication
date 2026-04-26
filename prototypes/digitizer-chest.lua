@@ -96,7 +96,6 @@ entity.flags = {"placeable-neutral", "player-creation"}
 entity.minable = {mining_time = 0.2, result = "digitizer-chest"}
 entity.corpse = nil
 entity.inventory_type = "with_filters_and_bar"
-entity.inventory_size = 48
 entity.picture =
     {
       layers =

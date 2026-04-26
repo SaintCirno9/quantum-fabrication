@@ -34,6 +34,7 @@ return function(context)
             entity_data.settings.reserve_limit = storage.options.default_reserve_limit or 0
             entity_data.settings.decraft = storage.options.default_decraft
             entity_data.settings.fluid_enabled = entity.name == "digitizer-chest" and storage.options.default_digitizer_chest_fluid_enabled == true
+            entity_data.settings.preserve_freshness = storage.options.default_preserve_freshness == true
             entity_data.signal_active = true
             entity_data.next_signal_check_tick = 0
             entity_data.signal_check_interval_ticks = digitizer_chest_signal_recheck_ticks

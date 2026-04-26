@@ -18,9 +18,26 @@ return function(context)
     local digitizer_chest_active_keepalive_ticks = context.digitizer_chest_active_keepalive_ticks
     local digitizer_chest_idle_to_long_idle_checks = context.digitizer_chest_idle_to_long_idle_checks
 
+    local function refresh_fresh_provider_inventory(inventory)
+        if not inventory or inventory.is_empty() then
+            return
+        end
+        for index = 1, #inventory do
+            local stack = inventory[index]
+            if stack.valid_for_read then
+                local item_prototype = prototypes.item[stack.name]
+                local spoil_ticks = item_prototype and item_prototype.get_spoil_ticks(stack.quality.name)
+                if spoil_ticks and spoil_ticks > 0 then
+                    stack.spoil_tick = game.tick + spoil_ticks
+                end
+            end
+        end
+    end
+
     function context.update_digitizer_chest_entity(entity_data)
         local entity = entity_data.entity
         local surface_index = entity_data.surface_index
+        local refresh_spoilable_items = entity_data.settings.preserve_freshness == true
 
         if entity.name == "digitizer-chest"
             and (
@@ -160,6 +177,9 @@ return function(context)
                 else
                     set_digitizer_chest_queue(entity_data, "idle")
                 end
+            end
+            if refresh_spoilable_items then
+                refresh_fresh_provider_inventory(inventory)
             end
             return
         end
@@ -411,6 +431,9 @@ return function(context)
             set_digitizer_chest_queue(entity_data, "signal")
         else
             set_digitizer_chest_queue(entity_data, "idle")
+        end
+        if refresh_spoilable_items then
+            refresh_fresh_provider_inventory(inventory)
         end
     end
 end

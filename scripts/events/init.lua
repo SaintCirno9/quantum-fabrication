@@ -50,6 +50,7 @@ function handlers.on_init()
         default_reserve_limit = 0,
         default_decraft = true,
         default_digitizer_chest_fluid_enabled = false,
+        default_preserve_freshness = false,
     }
     storage.sorted_lists = {}
     storage.tracked_requests = {
@@ -173,6 +174,9 @@ function handlers.on_config_changed()
     end
     if storage.options.default_digitizer_chest_fluid_enabled == nil then
         storage.options.default_digitizer_chest_fluid_enabled = false
+    end
+    if storage.options.default_preserve_freshness == nil then
+        storage.options.default_preserve_freshness = false
     end
     if storage.qf_enabled == nil then
         storage.qf_enabled = true
