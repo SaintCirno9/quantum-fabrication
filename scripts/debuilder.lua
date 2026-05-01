@@ -24,12 +24,16 @@ function instant_defabrication(entity, player_index)
     if not qs_item.name then game.print("instant_defabrication error - item name not found for " .. entity.ghost_name .. ", this shouldn't happen") return false end
 
     local player_inventory = utils.get_player_inventory(nil, player_index)
-    qs_utils.add_to_storage(qs_item, true)
     process_inventory(entity, player_inventory, surface_index)
     if Transport_belt_types[entity.type] then
         process_transport_line(entity, player_inventory, surface_index)
     end
-    return entity.destroy({raise_destroy = true})
+
+    local destroyed = entity.destroy({raise_destroy = true})
+    if destroyed then
+        qs_utils.add_to_storage(qs_item, true)
+    end
+    return destroyed
 end
 
 function instant_detileation()
