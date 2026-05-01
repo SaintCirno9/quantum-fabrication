@@ -1,4 +1,10 @@
 ---------------------------------------------------------------------------------------------------
+Version: 2.10.2
+Date: 01.05.2026
+  Bugfixes:
+    - Fixed a bug with upgrade planner that would put original items into the player's inventory and spill them on the ground if the inventory was full.
+    - Fixed a bug with deconstruction planner that would generate free resources out of thin air while trying to deconstruct undestructible entities.
+---------------------------------------------------------------------------------------------------
 Version: 2.10.1
 Date: 02.02.2026
   Bugfixes:
