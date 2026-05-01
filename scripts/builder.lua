@@ -126,7 +126,7 @@ function instant_upgrade(entity, target, quality, player_index)
         end
     end
 
-    local qs_item = {
+    local qs_item_target = {
         name = storage.prototypes_data[target.name].item_name,
         count = 1,
         type = "item",
@@ -134,12 +134,20 @@ function instant_upgrade(entity, target, quality, player_index)
         surface_index = surface_index
     }
 
+    local qs_item_source = {
+        name = storage.prototypes_data[entity.name].item_name,
+        count = 1,
+        type = "item",
+        quality = quality,
+        surface_index = surface_index
+    }
+
     -- Check if requested item is available
-    local in_storage, _, total = qs_utils.count_in_storage(qs_item, player_inventory, player_surface_index)
+    local in_storage, _, total = qs_utils.count_in_storage(qs_item_target, player_inventory, player_surface_index)
     local recipe
     -- If it's not, then we'll check for a recipe and return if it's not available either
     if total == 0 then
-        recipe = qf_utils.get_craftable_recipe(qs_item, player_inventory)
+        recipe = qf_utils.get_craftable_recipe(qs_item_target, player_inventory)
         if not recipe then return "no_recipe" end
     end
 
@@ -160,7 +168,7 @@ function instant_upgrade(entity, target, quality, player_index)
         quality = quality,
         force = entity.force,
         fast_replace = true,
-        player = player,
+        spill = false,
         raise_built = true,
         type = underground_belt_type,
     }
@@ -168,13 +176,14 @@ function instant_upgrade(entity, target, quality, player_index)
     if upgraded_entity then
         if recipe then
             qf_utils.fabricate_recipe(recipe, quality, surface_index, player_inventory)
-            qs_utils.remove_from_storage(qs_item)
+            qs_utils.remove_from_storage(qs_item_target)
         elseif in_storage == 0 then
             ---@diagnostic disable-next-line: need-check-nil
-            player_inventory.remove({name = qs_item.name, count = qs_item.count, quality = qs_item.quality})
+            player_inventory.remove({name = qs_item_target.name, count = qs_item_target.count, quality = qs_item_target.quality})
         else
-            qs_utils.remove_from_storage(qs_item)
+            qs_utils.remove_from_storage(qs_item_target)
         end
+        qs_utils.add_to_player_inventory(player_inventory, qs_item_source)
         return "success"
     end
 
